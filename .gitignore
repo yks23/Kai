@@ -1,0 +1,11 @@
+ongoing/
+report/
+logs/
+solved-report/*
+stats/
+tasks/
+testcases/
+unsolved-report/
+workers/
+*.json
+secretary_memory.md

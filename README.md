@@ -1,0 +1,93 @@
+# Secretary Agent 系统
+
+基于 **Cursor Agent** 的自动化任务系统：用户用自然语言提交任务，秘书 Agent 负责归类写入，扫描器调度 Worker Agent 执行任务并写报告。
+
+## 前置要求
+
+- **Python 3.10+**（使用标准库，无第三方依赖）
+- **Cursor** 已安装且 `cursor` 在 PATH 中（用于调用 `cursor agent`）
+
+## 快速开始
+
+```bash
+# 1. 提交任务（秘书会归入已有任务或创建新任务）
+python main.py task "实现一个 HTTP 服务器，使用 Python 标准库"
+
+# 2. 查看待办 / 进行中 / 已完成
+python main.py status
+
+# 3. 启动扫描器，持续处理任务（前台运行）
+python main.py scan
+
+# 单次扫描（处理完当前任务后退出）
+python main.py scan --once
+```
+
+## 目录结构
+
+| 目录/文件 | 说明 |
+|-----------|------|
+| `tasks/` | 待处理任务。秘书 Agent 将用户请求写入此处（新文件或追加到已有文件）。 |
+| `ongoing/` | 执行中任务。扫描器把 `tasks/` 中的文件移入此处，由 Worker Agent 执行。 |
+| `report/` | 已完成任务的报告。Worker 完成任务后在此生成 `*-report.md`。 |
+| `main.py` | 主入口：`task` / `scan` / `status` 命令。 |
+| `config.py` | 路径与运行参数（目录、扫描间隔、Cursor 等）。 |
+| `secretary.py` | 秘书 Agent：归类请求并写入 `tasks/`。 |
+| `scanner.py` | 扫描器：监控 `tasks/`，移入 `ongoing/` 并循环调用 Worker。 |
+| `worker.py` | Worker Agent：执行 `ongoing/` 中的任务，完成后删文件并写报告。 |
+| `agent_runner.py` | 调用 `cursor agent` CLI 的封装。 |
+
+## 命令说明
+
+| 命令 | 作用 |
+|------|------|
+| `python main.py task "描述"` | 提交任务，由秘书 Agent 归类到 `tasks/`。 |
+| `python main.py task "描述" -q` | 同上，安静模式（少输出）。 |
+| `python main.py scan` | 启动扫描器，持续处理 `tasks/` → `ongoing/` → 完成写报告。 |
+| `python main.py scan --once` | 只执行一轮扫描与处理。 |
+| `python main.py status` | 查看 tasks/、ongoing/、report/ 的文件数量与列表。 |
+
+## 环境变量与配置
+
+在 `config.py` 中可改路径；以下可通过环境变量覆盖：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CURSOR_BIN` | `cursor` | 调用 Cursor 的命令名。 |
+| `CURSOR_MODEL` | `Auto` | 传给 Cursor 的模型（`Auto` 表示不指定，由 Cursor 选择）。 |
+| `SCAN_INTERVAL` | `5` | 扫描器轮询 `tasks/` 的间隔（秒）。 |
+| `RETRY_INTERVAL` | `3` | Worker 未完成时，下一轮调用的间隔（秒）。 |
+
+示例：
+
+```bash
+export SCAN_INTERVAL=10
+export CURSOR_MODEL=claude-3.5-sonnet
+python main.py scan
+```
+
+## 工作流程简述
+
+1. **提交**：`main.py task "..."` → 秘书 Agent 读 `tasks/`，决定新建或追加 → 写入 `tasks/`。
+2. **扫描**：`main.py scan` 轮询 `tasks/`，发现 `.md` 则移到 `ongoing/`。
+3. **执行**：对每个 `ongoing/*.md` 反复调用 Worker Agent；Worker 可更新同一文件记录进展。
+4. **完成**：Worker 认为完成后删除该 `ongoing/*.md` 并在 `report/` 写 `*-report.md`；扫描器据此认为任务结束。
+
+## 与 Cursor 的关系
+
+- 秘书与 Worker 均通过 **Cursor Agent**（`cursor agent --print --force --trust --workspace <path> "<prompt>"`）执行。
+- 需在已安装 Cursor 的环境中运行，且具备调用 `cursor` 的权限。
+- `.cursor/rules/secretary-agent.md` 中定义了秘书 / Worker 的全局规则，供 Cursor 使用。
+
+## 任务文件格式
+
+`tasks/` 与 `ongoing/` 中的任务文件建议为 Markdown，包含：
+
+- `# 任务: 标题`
+- `## 描述` / `## 目标` / `## 工作区`（工作区为 Worker 执行目录，可选）
+
+Worker 未完成时会在文件末尾追加 `## 进展记录`；完成后会删除该文件并在 `report/` 写入报告。
+
+---
+
+更多改进方向与优先级见 [IMPROVEMENTS.md](./IMPROVEMENTS.md)。

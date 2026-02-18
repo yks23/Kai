@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secretary-agent"
+version = "0.1.0"
+description = "基于 Cursor Agent 的自动化任务编排系统 (小名: kai)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "rich>=13.0",
+]
+
+[project.scripts]
+# 主入口: kai (小名)
+kai = "secretary.cli:main"
+# 兼容旧名
+secretary = "secretary.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["secretary*"]
+
+[tool.setuptools.package-data]
+secretary = ["prompts/*.md"]
