@@ -26,13 +26,8 @@ from datetime import datetime
 from pathlib import Path
 
 import secretary.config as cfg
+from secretary.agent_loop import load_prompt
 from secretary.agent_runner import run_agent
-
-
-def _load_prompt_template() -> str:
-    """加载秘书提示词模板"""
-    tpl_path = cfg.PROMPTS_DIR / "secretary.md"
-    return tpl_path.read_text(encoding="utf-8")
 
 
 def _load_memory() -> str:
@@ -249,7 +244,7 @@ def build_secretary_prompt(user_request: str) -> str:
             f"{goals_text}\n"
         )
 
-    template = _load_prompt_template()
+    template = load_prompt("secretary.md")
     # 注意: 不再使用根目录的 tasks_dir，所有任务都分配到 worker 目录
     # 这里保留 tasks_dir 参数用于提示词模板兼容，但实际应该使用 worker 目录
     default_tasks_dir = cfg.WORKERS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"

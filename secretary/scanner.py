@@ -1,5 +1,6 @@
 """
-任务扫描器 — 后台主循环 (支持多实例并行 + 命名工人)
+任务扫描器 — 后台主循环 (支持多实例并行 + 命名工人)。
+使用 agent_loop.run_loop 统一循环。
 
 执行范围: 仅 execution_scope 为 task / hire / recycle 的任务会被执行；
   monitor 等其它类型不进入执行流程（见 config.EXECUTABLE_TASK_TYPES）。
@@ -34,6 +35,7 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
+from typing import Literal
 
 import re
 
@@ -41,6 +43,8 @@ import secretary.config as cfg
 from secretary.config import EXECUTABLE_TASK_TYPES
 from secretary.worker import run_worker_first_round, run_worker_continue, run_worker_refine
 from secretary.agent_runner import RoundStats
+from secretary.agent_loop import run_loop
+from secretary.secretary_agent import run_secretary
 
 # 确保输出实时刷新（用于后台运行时日志及时写入）
 # 创建一个带自动刷新的 print 函数
@@ -54,8 +58,52 @@ def print(*args, **kwargs):
 # 当前 scanner 进程 ID
 _PID = os.getpid()
 
-# 当前工人名 (None = 使用默认 worker)
-_WORKER_NAME: str | None = None
+
+# ============================================================
+#  Scanner 角色 (统一 kai / worker 等)
+# ============================================================
+
+@dataclass
+class ScannerRole:
+    """
+    扫描器角色配置：同一套循环逻辑，通过 role 区分目录与执行方式。
+    - kai: tasks_dir + output_dir (assigned), no ongoing, runner=secretary (单次 run_secretary)
+    - worker: tasks_dir + ongoing_dir, runner=worker (多轮 process_ongoing_task)
+    """
+    name: str
+    tasks_dir: Path
+    ongoing_dir: Path | None  # None = kai 风格，不经过 ongoing
+    output_dir: Path | None   # kai = assigned；worker = None（完成即删除 ongoing 内文件）
+    runner: Literal["secretary", "worker"]
+    log_file: Path | None = None  # kai 的 scanner 日志
+    label: str = ""              # 控制台前缀，如 "🤖 kai" / "👷 sen"
+
+
+def build_kai_role() -> ScannerRole:
+    """Kai（秘书）角色：tasks → assigned，单次 run_secretary。"""
+    return ScannerRole(
+        name="kai",
+        tasks_dir=cfg.KAI_TASKS_DIR,
+        ongoing_dir=None,
+        output_dir=cfg.KAI_ASSIGNED_DIR,
+        runner="secretary",
+        log_file=cfg.KAI_SCANNER_LOG,
+        label="🤖 kai",
+    )
+
+
+def build_worker_role(worker_name: str) -> ScannerRole:
+    """Worker 角色：tasks + ongoing，多轮 process_ongoing_task。"""
+    name = worker_name or cfg.DEFAULT_WORKER_NAME
+    return ScannerRole(
+        name=name,
+        tasks_dir=cfg.WORKERS_DIR / name / "tasks",
+        ongoing_dir=cfg.WORKERS_DIR / name / "ongoing",
+        output_dir=None,
+        runner="worker",
+        log_file=None,
+        label=f"👷 {name}",
+    )
 
 
 # ============================================================
@@ -63,21 +111,6 @@ _WORKER_NAME: str | None = None
 # ============================================================
 
 # 锁机制已移除：每个 worker 有独立的目录，不需要锁
-
-
-def _get_tasks_dir() -> Path:
-    """获取当前工人的 tasks 目录"""
-    worker_name = _WORKER_NAME or cfg.DEFAULT_WORKER_NAME
-    return cfg.WORKERS_DIR / worker_name / "tasks"
-
-
-def _get_ongoing_dir() -> Path:
-    """获取当前工人的 ongoing 目录"""
-    worker_name = _WORKER_NAME or cfg.DEFAULT_WORKER_NAME
-    return cfg.WORKERS_DIR / worker_name / "ongoing"
-
-
-# 锁机制已移除，不再需要清理锁文件
 
 
 # ============================================================
@@ -185,10 +218,8 @@ def _write_scanner_report(task_stats: TaskStats):
       - {task_name}-stats.md  — 可读的 Markdown 统计报告
       - {task_name}-stats.json — 结构化数据 (数字统计 + 完整对话日志)
     """
-    # 获取当前 worker 的 stats 目录
-    from secretary.agents import _worker_stats_dir
-    worker_name = _WORKER_NAME or cfg.DEFAULT_WORKER_NAME
-    stats_dir = _worker_stats_dir(worker_name)
+    # 统计统一写入 kai/stats（与 REPORT_DIR 同属 kai 目录，便于 recycler 读取）
+    stats_dir = cfg.STATS_DIR
     stats_dir.mkdir(parents=True, exist_ok=True)
     
     # ---- Markdown 统计报告 ----
@@ -323,19 +354,8 @@ def _is_executable_task(task_file: Path) -> bool:
     return scope in EXECUTABLE_TASK_TYPES
 
 
-def scan_new_tasks() -> list[Path]:
-    """扫描 tasks/ 中的 .md 文件，仅返回需要执行的任务（execution_scope 为 task/hire/recycle）。"""
-    tasks_dir = _get_tasks_dir()
-    if not tasks_dir.exists():
-        return []
-    all_md = list(tasks_dir.glob("*.md"))
-    executable = [p for p in all_md if _is_executable_task(p)]
-    return sorted(executable, key=lambda p: p.stat().st_mtime)
-
-
-def move_to_ongoing(task_file: Path) -> Path | None:
-    """将任务文件从 tasks/ 移动到 ongoing/，如果文件已不存在则返回 None"""
-    ongoing_dir = _get_ongoing_dir()
+def _move_task_to_ongoing_dir(task_file: Path, ongoing_dir: Path) -> Path | None:
+    """将任务文件移动到指定 ongoing 目录；用于统一扫描器按 role 指定目录。"""
     ongoing_dir.mkdir(parents=True, exist_ok=True)
     if not task_file.exists():
         print(f"   ⚠️ 文件已不存在，跳过: {task_file.name}")
@@ -527,134 +547,225 @@ def _print_report(task_name: str):
 
 
 # ============================================================
-#  主扫描循环
+#  统一扫描器：trigger + process 按 role 分发
 # ============================================================
 
-def _pick_one_ongoing() -> Path | None:
-    """从 ongoing/ 中找一个可执行的任务"""
-    ongoing_dir = _get_ongoing_dir()
-    if not ongoing_dir.exists():
-        return None
-    candidates = [
-        f for f in sorted(ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
-        if _is_executable_task(f)
-    ]
-    return candidates[0] if candidates else None
-
-
-def _pick_one_new() -> Path | None:
-    """从 tasks/ 中找一个可执行的任务，移动到 ongoing/ 并返回路径"""
-    new_tasks = scan_new_tasks()
-    for task_file in new_tasks:
-        ongoing_file = move_to_ongoing(task_file)
-        if ongoing_file:
-            return ongoing_file
-    return None
-
-
-def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | None = None):
+def _unified_trigger(role: ScannerRole) -> list[Path]:
     """
-    运行主扫描循环。
-
-    每个 worker 有独立的目录，因此不需要锁机制。
-    每个 scanner 只处理自己 worker 目录中的任务。
-
-    - worker_name: 工人名 (如 "alice")。有名字时扫描 {name}/tasks/ 和 {name}/ongoing/;
-                   无名字时扫描全局 tasks/ 和 ongoing/。
-    - once=False（默认）: 持续运行，每 SCAN_INTERVAL 秒扫描一次。
-    - once=True: 只执行一个周期后退出（用于测试或单次拉取）。
+    统一触发逻辑：有 ongoing 则优先 ongoing 再 tasks→ongoing；无 ongoing（kai）则只取 tasks 一项。
     """
-    global _WORKER_NAME
-    # 如果 worker_name 是 None，使用默认 worker
-    if worker_name is None:
-        worker_name = cfg.DEFAULT_WORKER_NAME
-    _WORKER_NAME = worker_name
-    
-    # 确定实际使用的 worker（包括默认 worker）
-    effective_worker = worker_name
+    # 有 ongoing_dir 时优先从 ongoing 取一个可执行任务
+    if role.ongoing_dir is not None and role.ongoing_dir.exists():
+        candidates = [
+            f for f in sorted(role.ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
+            if _is_executable_task(f)
+        ]
+        if candidates:
+            return [candidates[0]]
 
-    tasks_dir = _get_tasks_dir()
-    ongoing_dir = _get_ongoing_dir()
+    # 从 tasks_dir 取任务
+    if not role.tasks_dir.exists():
+        return []
+    all_md = list(role.tasks_dir.glob("*.md"))
+    if not all_md:
+        return []
+    # worker：只执行 execution_scope 为 task/hire/recycle 的；kai：不筛选，保持原行为
+    if role.ongoing_dir is not None:
+        executable = [p for p in all_md if _is_executable_task(p)]
+        tasks_list = sorted(executable, key=lambda p: p.stat().st_mtime)
+    else:
+        tasks_list = sorted(all_md, key=lambda p: p.stat().st_mtime)
+    if not tasks_list:
+        return []
+    task_file = tasks_list[0]
+    if role.ongoing_dir is not None:
+        dest = _move_task_to_ongoing_dir(task_file, role.ongoing_dir)
+        return [dest] if dest else []
+    return [task_file]
 
-    # 确保工人的目录存在
+
+def _process_one_unified(role: ScannerRole, file_path: Path, verbose: bool) -> None:
+    """
+    统一处理分发：secretary = 移到 output_dir + run_secretary 一次；worker = process_ongoing_task。
+    """
+    if role.runner == "secretary":
+        if role.output_dir is None or role.log_file is None:
+            print(f"⚠️ [{role.label} PID={_PID}] secretary 角色缺少 output_dir 或 log_file")
+            return
+        _process_one_kai_task(
+            file_path, role.output_dir, role.log_file, role.label, verbose
+        )
+    elif role.runner == "worker":
+        process_ongoing_task(file_path, verbose=verbose)
+    else:
+        print(f"⚠️ [{role.label} PID={_PID}] 未知 runner: {role.runner}")
+
+
+def run_unified_scanner(role: ScannerRole, once: bool = False, verbose: bool = True) -> None:
+    """
+    统一扫描循环：按 role 的 tasks_dir / ongoing_dir / output_dir 与 runner 类型，
+    使用同一套 trigger + process，可变部分由装载的提示词与 runner（secretary / worker）体现。
+    """
+    tasks_dir = role.tasks_dir
     tasks_dir.mkdir(parents=True, exist_ok=True)
-    ongoing_dir.mkdir(parents=True, exist_ok=True)
+    if role.ongoing_dir is not None:
+        role.ongoing_dir.mkdir(parents=True, exist_ok=True)
+    if role.output_dir is not None:
+        role.output_dir.mkdir(parents=True, exist_ok=True)
+    if role.runner == "secretary" and role.log_file is not None:
+        role.log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # 确保 worker 已注册（包括默认 worker）
-    from secretary.agents import register_worker, update_worker_status
-    register_worker(effective_worker, description="通用工人" if not worker_name else "")
-    update_worker_status(effective_worker, "busy", pid=_PID)
+    if role.runner == "worker":
+        from secretary.agents import register_worker, update_worker_status, record_task_completion
+        register_worker(role.name, description="通用工人" if role.name == cfg.DEFAULT_WORKER_NAME else "")
+        update_worker_status(role.name, "busy", pid=_PID)
 
-    label = f"👷 {effective_worker}"
-
-    # 获取 worker 的 stats 目录
-    from secretary.agents import _worker_stats_dir
-    worker_stats_dir = _worker_stats_dir(effective_worker)
-    
+    label = role.label
     print("=" * 60)
     print(f"{label} 启动  (PID={_PID})")
-    print(f"   监控目录: {tasks_dir}")
-    print(f"   执行目录: {ongoing_dir}")
-    print(f"   报告目录: {cfg.REPORT_DIR}")
-    print(f"   统计目录: {worker_stats_dir}")
+    print(f"   任务目录: {tasks_dir}")
+    if role.ongoing_dir is not None:
+        print(f"   执行目录: {role.ongoing_dir}")
+    if role.output_dir is not None:
+        print(f"   已分配目录: {role.output_dir}")
+    if role.log_file is not None:
+        print(f"   日志文件: {role.log_file}")
+    if role.runner == "worker":
+        print(f"   报告目录: {cfg.REPORT_DIR}")
+        print(f"   统计目录: {cfg.STATS_DIR}")
     print(f"   扫描间隔: {cfg.SCAN_INTERVAL}s")
     print(f"   模式: {'单次' if once else '持续运行（循环直到 Ctrl+C）'}")
-    if worker_name:
-        print(f"   工人名: {worker_name}")
-    else:
+    if role.runner == "worker" and role.name != cfg.DEFAULT_WORKER_NAME:
+        print(f"   工人名: {role.name}")
+    elif role.runner == "worker":
         print(f"   💡 可启动多个 `kai hire` 或 `kai hire <name>` 并行处理任务")
     print("=" * 60)
 
-    cycle = 0
+    def trigger_fn():
+        return _unified_trigger(role)
+
+    def process_fn(file_path: Path):
+        if role.runner == "worker":
+            print(f"\n📋 [{label} PID={_PID}] 处理任务: {file_path.name}")
+        _process_one_unified(role, file_path, verbose)
+        if role.runner == "worker":
+            from secretary.agents import record_task_completion
+            record_task_completion(role.name, file_path.stem)
+
+    def on_idle():
+        if verbose:
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"💤 [{label} PID={_PID}] [{ts}] 没有新任务，{cfg.SCAN_INTERVAL}s 后再扫描...")
+
+    def on_exit():
+        if role.runner == "worker":
+            try:
+                from secretary.agents import update_worker_status
+                update_worker_status(role.name, "idle", pid=None)
+            except Exception:
+                pass
+
+    run_loop(
+        trigger_fn=trigger_fn,
+        process_fn=process_fn,
+        interval_sec=cfg.SCAN_INTERVAL,
+        once=once,
+        label=label,
+        verbose=verbose,
+        on_idle=on_idle,
+        on_exit=on_exit,
+    )
+
+
+# ============================================================
+#  Kai 扫描器（秘书任务队列：tasks → assigned → run_secretary）
+# ============================================================
+
+def _process_one_kai_task(
+    task_file: Path,
+    assigned_dir: Path,
+    log_file: Path,
+    label: str,
+    verbose: bool,
+) -> None:
+    """处理 kai 任务队列中的单文件：读内容、移到 assigned、重定向输出并调用 run_secretary。"""
+    try:
+        request = task_file.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        print(f"⚠️ [{label} PID={_PID}] 读取任务文件失败: {e}", file=sys.stderr)
+        if task_file.exists():
+            error_file = assigned_dir / f"error-{task_file.name}"
+            shutil.move(str(task_file), str(error_file))
+        return
+
+    assigned_file = assigned_dir / task_file.name
+    try:
+        shutil.move(str(task_file), str(assigned_file))
+    except Exception as e:
+        print(f"⚠️ [{label} PID={_PID}] 移动任务文件失败: {e}", file=sys.stderr)
+        return
+
+    class FlushFile:
+        def __init__(self, file):
+            self.file = file
+        def write(self, s):
+            self.file.write(s)
+            self.file.flush()
+        def flush(self):
+            self.file.flush()
+        def __getattr__(self, name):
+            return getattr(self.file, name)
 
     try:
-        while True:
-            cycle += 1
+        with open(log_file, "a", encoding="utf-8", buffering=1) as log_f:
+            flush_log = FlushFile(log_f)
+            orig_stdout, orig_stderr = sys.stdout, sys.stderr
             try:
-                # 1. 优先处理 ongoing/ 中已有的任务
-                target = _pick_one_ongoing()
-                if target:
-                    print(f"\n📋 [{label} PID={_PID}] 处理任务: {target.name}")
-                    process_ongoing_task(target, verbose=verbose)
-                    from secretary.agents import record_task_completion
-                    record_task_completion(effective_worker, target.stem)
-
-                # 2. 如果 ongoing/ 没活了，从 tasks/ 拉新任务
-                elif not once or cycle == 1:
-                    new_target = _pick_one_new()
-                    if new_target:
-                        print(f"\n📋 [{label} PID={_PID}] 新任务: {new_target.name}")
-                        process_ongoing_task(new_target, verbose=verbose)
-                        from secretary.agents import record_task_completion
-                        record_task_completion(effective_worker, new_target.stem)
-                    else:
-                        if verbose:
-                            ts = datetime.now().strftime("%H:%M:%S")
-                            print(f"💤 [{label} PID={_PID}] [{ts}] 没有新任务，{cfg.SCAN_INTERVAL}s 后再扫描...")
-
-            except Exception as e:
-                # 单周期内异常不退出：记录后继续下一轮
-                ts = datetime.now().strftime("%H:%M:%S")
-                print(f"\n⚠️ [{label} PID={_PID}] [{ts}] 本周期异常（已忽略，继续下一轮）: {e}",
-                      file=sys.stderr)
-                if verbose:
-                    traceback.print_exc(file=sys.stderr)
-
-            if once:
-                break
-
-            time.sleep(cfg.SCAN_INTERVAL)
-
-    except KeyboardInterrupt:
-        print(f"\n\n🛑 {label} 已停止 (PID={_PID}, 共 {cycle} 个周期)")
-    finally:
-        # 更新工人状态
+                sys.stdout = sys.stderr = flush_log
+                log_f.write("\n" + "=" * 60 + "\n")
+                log_f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理任务: {task_file.name}\n")
+                log_f.write("=" * 60 + "\n\n")
+                log_f.flush()
+                run_secretary(request, verbose=True)
+                log_f.write("\n" + "=" * 60 + "\n")
+                log_f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 任务完成: {task_file.name}\n")
+                log_f.write("=" * 60 + "\n\n")
+                log_f.flush()
+            finally:
+                sys.stdout, sys.stderr = orig_stdout, orig_stderr
+        if verbose:
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"✅ [{label} PID={_PID}] [{ts}] 任务处理完成: {task_file.name}")
+            print(f"   日志已写入: {log_file}")
+    except Exception as e:
         try:
-            from secretary.agents import update_worker_status
-            final_worker = worker_name or cfg.DEFAULT_WORKER_NAME
-            update_worker_status(final_worker, "idle", pid=None)
+            with open(log_file, "a", encoding="utf-8") as log_f:
+                log_f.write(f"\n⚠️ 处理任务时发生错误: {e}\n")
+                traceback.print_exc(file=log_f)
         except Exception:
             pass
+        print(f"⚠️ [{label} PID={_PID}] 处理任务时发生错误: {e}", file=sys.stderr)
+        if verbose:
+            traceback.print_exc(file=sys.stderr)
+
+
+def run_kai_scanner(once: bool = False, verbose: bool = False) -> None:
+    """运行 Kai（秘书）任务扫描器：扫描 agents/kai/tasks/，每项调用 run_secretary，输出写入 kai/logs。"""
+    role = build_kai_role()
+    run_unified_scanner(role, once=once, verbose=verbose)
+
+
+# ============================================================
+#  Worker 扫描器（tasks/ongoing → process_ongoing_task）
+# ============================================================
+
+def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | None = None) -> None:
+    """
+    运行主扫描循环（使用 agent_loop.run_loop）。
+    每轮最多处理一项：优先 ongoing/，否则从 tasks/ 拉新任务。
+    """
+    role = build_worker_role(worker_name or cfg.DEFAULT_WORKER_NAME)
+    run_unified_scanner(role, once=once, verbose=verbose)
 
 
 if __name__ == "__main__":

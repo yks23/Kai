@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "secretary-agent"
+name = "kai"
 version = "0.1.0"
-description = "基于 Cursor Agent 的自动化任务编排系统 (小名: kai)"
+description = "Kai — 基于 Cursor Agent 的自动化任务编排系统"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -14,7 +14,6 @@ dependencies = [
 ]
 
 [project.scripts]
-# 主入口: kai (小名)
 kai = "secretary.cli:main"
 # 兼容旧名
 secretary = "secretary.cli:main"

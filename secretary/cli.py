@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Secretary Agent System — CLI 入口 (小名: kai)
+Kai — CLI 入口（基于 Cursor Agent 的自动化任务系统）
 
 用法:
   kai task "实现一个HTTP服务器"
@@ -72,6 +72,21 @@ def _check_process_exists(pid: int) -> bool:
 #  任务提交
 # ============================================================
 
+def _write_kai_task(request: str, min_time: int = 0) -> Path:
+    """公用：将任务写入 kai 的 tasks 目录，由 kai 扫描器处理（run_secretary）。
+    与 task 命令不指定 --worker 时行为一致。返回写入的文件路径。
+    """
+    cfg.KAI_TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    task_file_name = f"task-{timestamp}.md"
+    task_file = cfg.KAI_TASKS_DIR / task_file_name
+    task_content = request
+    if min_time > 0:
+        task_content += f"\n\n<!-- min_time: {min_time} -->\n"
+    task_file.write_text(task_content, encoding="utf-8")
+    return task_file
+
+
 def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None):
     """公用: 通过秘书Agent提交任务，可选嵌入最低执行时间元数据
     
@@ -84,7 +99,7 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
         print("❌ 请提供任务描述")
         sys.exit(1)
 
-    # 如果指定了 worker，直接写入该 worker 的 tasks 目录
+    # 如果指定了 worker，直接写入该 worker 的 tasks 目录；否则交给下面写 kai tasks
     if worker_name:
         from secretary.agents import get_worker, register_worker, _worker_tasks_dir
         import secretary.config as cfg
@@ -147,12 +162,12 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
     print(f"\n📨 提交任务: {request}")
     if min_time > 0:
         print(f"   ⏱️ 最低执行时间: {min_time}s")
-    print(f"   ⏳ 后台执行中，输出写入 secretary.log")
+    print(f"   ⏳ 后台执行中，输出写入 {cfg.KAI_SECRETARY_LOG}")
     print(f"   使用 `{_cli_name()} check kai` 查看日志\n")
 
-    # 后台执行，输出到 secretary.log
-    secretary_log_file = cfg.BASE_DIR / "secretary.log"
-    secretary_log_file.parent.mkdir(parents=True, exist_ok=True)
+    # 后台执行，输出写到 kai 日志目录
+    cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    secretary_log_file = cfg.KAI_SECRETARY_LOG
     
     # 构建命令（使用 shlex 正确处理带引号的任务描述）
     import shlex
@@ -195,27 +210,8 @@ def cmd_task(args):
     if worker_name:
         _submit_task(request, min_time=args.time, worker_name=worker_name)
     else:
-        # 将任务写入 kai 的 tasks/ 目录，由 kai 的扫描器处理
-        import secretary.config as cfg
-        from datetime import datetime
-        
-        # 确保目录存在
-        cfg.KAI_TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        
-        # 生成任务文件名
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]  # 包含毫秒
-        task_file_name = f"task-{timestamp}.md"
-        
-        # 创建任务文件
-        task_file = cfg.KAI_TASKS_DIR / task_file_name
-        
-        # 写入任务内容
-        task_content = request
-        if args.time > 0:
-            task_content += f"\n\n<!-- min_time: {args.time} -->\n"
-        
-        task_file.write_text(task_content, encoding="utf-8")
-        
+        # 复用：将任务写入 kai 的 tasks/ 目录，由 kai 的扫描器处理
+        task_file = _write_kai_task(request, min_time=args.time)
         print(f"\n📨 任务已提交到 kai")
         print(f"   ✅ 任务文件: {task_file}")
         if args.time > 0:
@@ -225,163 +221,127 @@ def cmd_task(args):
 
 
 def _run_keep_monitor(goal: str, worker_name: str):
-    """内部函数：执行 keep 监控循环"""
-    import time
+    """内部函数：执行 keep 监控循环（使用 agent_loop.run_loop，触发条件为 tasks+ongoing 均空）。"""
+    import json
     from secretary.agents import get_worker, register_worker, _worker_tasks_dir, _worker_ongoing_dir
+    from secretary.agent_loop import run_loop
     import secretary.config as cfg
-    
-    # 1. 确保 worker 存在
+
+    # 确保 worker 存在并启动
     worker = get_worker(worker_name)
     if not worker:
         print(f"ℹ️  Worker '{worker_name}' 不存在，自动创建并启动...")
         register_worker(worker_name, description=f"持续监控模式: {goal[:50]}")
         worker = get_worker(worker_name)
-        
-        # 自动启动 worker
         print(f"🚀 自动启动 worker '{worker_name}'...")
-        start_worker_name = worker_name
         class StartArgs:
             def __init__(self):
-                self.worker_name = start_worker_name
+                self.worker_names = [worker_name]
                 self.once = False
         cmd_start(StartArgs())
-    
-    # 2. 检查 worker 是否在运行
-    if worker.get("pid"):
-        if _check_process_exists(worker["pid"]):
-            print(f"✅ Worker '{worker_name}' 正在运行 (PID={worker['pid']})")
-        else:
-            print(f"⚠️  Worker '{worker_name}' 的进程不存在，重新启动...")
-            start_worker_name = worker_name
-            class StartArgs:
-                def __init__(self):
-                    self.worker_name = start_worker_name
-                    self.once = False
-            cmd_start(StartArgs())
-    else:
+    if worker.get("pid") and not _check_process_exists(worker["pid"]):
+        print(f"⚠️  Worker '{worker_name}' 的进程不存在，重新启动...")
+        class StartArgs:
+            def __init__(self):
+                self.worker_names = [worker_name]
+                self.once = False
+        cmd_start(StartArgs())
+    elif not worker.get("pid"):
         print(f"⚠️  Worker '{worker_name}' 未运行，启动中...")
-        start_worker_name = worker_name
         class StartArgs:
             def __init__(self):
-                self.worker_name = start_worker_name
+                self.worker_names = [worker_name]
                 self.once = False
         cmd_start(StartArgs())
-    
-    # 3. 保存持续目标到 worker 目录
+
     goal_file = cfg.WORKERS_DIR / worker_name / "keep-goal.md"
+    goal_file.parent.mkdir(parents=True, exist_ok=True)
     goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
-    
-    # 4. 进入监控循环
-    scan_interval = 10  # 每 10 秒检查一次
+
+    scan_interval = 10
     print(f"\n📊 开始监控循环（每 {scan_interval} 秒检查一次）...")
     print(f"   按 Ctrl+C 退出\n")
-    
-    try:
-        while True:
-            tasks_dir = _worker_tasks_dir(worker_name)
-            ongoing_dir = _worker_ongoing_dir(worker_name)
-            
-            # 检查 tasks 和 ongoing 是否都为空
-            tasks = list(tasks_dir.glob("*.md")) if tasks_dir.exists() else []
-            ongoing = list(ongoing_dir.glob("*.md")) if ongoing_dir.exists() else []
-            
-            if len(tasks) == 0 and len(ongoing) == 0:
-                # 生成新任务 - 让秘书读取状态并自己决定任务
-                print(f"\n📝 [{datetime.now().strftime('%H:%M:%S')}] 检测到任务队列为空，让秘书决定新任务...")
-                
-                # 收集已完成的任务信息
-                stats_dir = cfg.WORKERS_DIR / worker_name / "stats"
-                completed_tasks_info = []
-                if stats_dir.exists():
-                    for report_file in sorted(stats_dir.glob("*-stats.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-                        try:
-                            import json
-                            stats_data = json.loads(report_file.read_text(encoding="utf-8"))
-                            task_name = report_file.stem.replace("-stats", "")
-                            summary = stats_data.get("summary", "") if isinstance(stats_data, dict) else ""
-                            completed_tasks_info.append({
-                                "name": task_name,
-                                "summary": summary
-                            })
-                        except:
-                            pass
-                
-                if not completed_tasks_info:
-                    reports_dir = cfg.REPORT_DIR
-                    if reports_dir.exists():
-                        for report_file in sorted(reports_dir.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-                            try:
-                                content = report_file.read_text(encoding="utf-8")
-                                lines = content.splitlines()
-                                title = ""
-                                for line in lines[:10]:
-                                    if line.strip().startswith("#"):
-                                        title = line.strip().lstrip("#").strip()
-                                        break
-                                if not title:
-                                    title = report_file.stem.replace("-report", "")
-                                completed_tasks_info.append({
-                                    "name": title,
-                                    "summary": content[:300] if len(content) > 300 else content
-                                })
-                            except:
-                                pass
-                
-                # 构建已完成任务摘要
-                completed_summary = ""
-                if completed_tasks_info:
-                    completed_summary = "\n已完成的任务：\n"
-                    for i, task_info in enumerate(completed_tasks_info, 1):
-                        completed_summary += f"{i}. {task_info['name']}"
-                        if task_info.get('summary'):
-                            summary_text = task_info['summary'][:150] + "..." if len(task_info['summary']) > 150 else task_info['summary']
-                            completed_summary += f" - {summary_text}"
-                        completed_summary += "\n"
-                
-                # 构建请求
-                request = f"""【持续监控模式】当前任务队列为空，请基于以下信息决定下一步应该做什么：
+
+    def _build_keep_request():
+        completed_tasks_info = []
+        if cfg.STATS_DIR.exists():
+            for report_file in sorted(cfg.STATS_DIR.glob("*-stats.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+                try:
+                    stats_data = json.loads(report_file.read_text(encoding="utf-8"))
+                    task_name = report_file.stem.replace("-stats", "")
+                    summary = stats_data.get("summary", "") if isinstance(stats_data, dict) else ""
+                    completed_tasks_info.append({"name": task_name, "summary": summary})
+                except Exception:
+                    pass
+        if not completed_tasks_info and cfg.REPORT_DIR.exists():
+            for report_file in sorted(cfg.REPORT_DIR.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+                try:
+                    content = report_file.read_text(encoding="utf-8")
+                    lines = content.splitlines()
+                    title = ""
+                    for line in lines[:10]:
+                        if line.strip().startswith("#"):
+                            title = line.strip().lstrip("#").strip()
+                            break
+                    if not title:
+                        title = report_file.stem.replace("-report", "")
+                    completed_tasks_info.append({"name": title, "summary": content[:300] if len(content) > 300 else content})
+                except Exception:
+                    pass
+        completed_summary = ""
+        if completed_tasks_info:
+            completed_summary = "\n已完成的任务：\n"
+            for i, task_info in enumerate(completed_tasks_info, 1):
+                completed_summary += f"{i}. {task_info['name']}"
+                if task_info.get('summary'):
+                    s = task_info['summary']
+                    completed_summary += f" - {s[:150] + '...' if len(s) > 150 else s}"
+                completed_summary += "\n"
+        return f"""【持续监控模式】当前任务队列为空，请基于以下信息决定下一步应该做什么：
 
 持续目标：{goal}
 {completed_summary}
 
 请分析持续目标和已完成的工作，决定下一步应该做什么来推进目标，并生成一个具体的、可执行的任务分配给 worker '{worker_name}'。"""
-                
-                # 后台执行 task 命令，输出到 secretary.log
-                secretary_log_file = cfg.BASE_DIR / "secretary.log"
-                secretary_log_file.parent.mkdir(parents=True, exist_ok=True)
-                
-                sub_cmd = [sys.executable, "-m", "secretary.cli", "task"] + request.split()
-                env = os.environ.copy()
-                env["PYTHONIOENCODING"] = "utf-8"
-                
-                fh = open(secretary_log_file, "a", encoding="utf-8")
-                fh.write(f"# Keep mode task generation: {request[:100]}\n")
-                fh.write(f"# Started: {datetime.now().isoformat()}\n\n")
-                fh.flush()
-                
-                subprocess.Popen(
-                    sub_cmd,
-                    stdout=fh,
-                    stderr=subprocess.STDOUT,
-                    cwd=str(cfg.BASE_DIR),
-                    env=env,
-                )
-                fh.close()
-                print(f"   ✅ 已提交给秘书，输出写入 secretary.log")
-            else:
-                status = f"待处理: {len(tasks)}, 执行中: {len(ongoing)}"
-                print(f"   [{datetime.now().strftime('%H:%M:%S')}] {status}", end="\r")
-            
-            time.sleep(scan_interval)
-            
-    except KeyboardInterrupt:
-        print(f"\n\n👋 退出持续监控模式")
-        print(f"   持续目标已保存: {goal_file}")
+
+    def trigger_fn():
+        tasks_dir = _worker_tasks_dir(worker_name)
+        ongoing_dir = _worker_ongoing_dir(worker_name)
+        tasks = list(tasks_dir.glob("*.md")) if tasks_dir.exists() else []
+        ongoing = list(ongoing_dir.glob("*.md")) if ongoing_dir.exists() else []
+        if len(tasks) == 0 and len(ongoing) == 0:
+            return [None]  # 一项占位，表示需要生成任务
+        return []
+
+    def process_fn(_item):
+        print(f"\n📝 [{datetime.now().strftime('%H:%M:%S')}] 检测到任务队列为空，让秘书决定新任务...")
+        request = _build_keep_request()
+        _write_kai_task(request)
+        print(f"   ✅ 已提交到 kai 任务队列，由秘书处理（需运行 `{_cli_name()} start kai`）")
+
+    def on_idle():
+        tasks_dir = _worker_tasks_dir(worker_name)
+        ongoing_dir = _worker_ongoing_dir(worker_name)
+        tasks = list(tasks_dir.glob("*.md")) if tasks_dir.exists() else []
+        ongoing = list(ongoing_dir.glob("*.md")) if ongoing_dir.exists() else []
+        status = f"待处理: {len(tasks)}, 执行中: {len(ongoing)}"
+        print(f"   [{datetime.now().strftime('%H:%M:%S')}] {status}", end="\r")
+
+    run_loop(
+        trigger_fn=trigger_fn,
+        process_fn=process_fn,
+        interval_sec=scan_interval,
+        once=False,
+        label="keep",
+        verbose=True,
+        on_idle=on_idle,
+    )
+    print(f"\n\n👋 退出持续监控模式")
+    print(f"   持续目标已保存: {goal_file}")
 
 
 def cmd_keep(args):
     """持续监控模式：为指定 worker 持续生成任务以推进目标 - 后台执行"""
-    from secretary.agents import _worker_logs_dir
     import secretary.config as cfg
     import subprocess
     
@@ -394,16 +354,15 @@ def cmd_keep(args):
         _run_keep_monitor(goal, worker_name)
         return
     
-    # 后台执行，输出到 worker 的 scanner.log
-    log_dir = _worker_logs_dir(worker_name)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    scanner_log_file = log_dir / "scanner.log"
+    # 后台执行，输出写到 kai 日志目录（keep 由 kai 驱动，与 worker 的 scanner.log 分开）
+    cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    keep_log_file = cfg.KAI_KEEP_LOG
     
     print(f"\n🔄 启动持续监控模式（后台执行）")
     print(f"   目标: {goal}")
     print(f"   Worker: {worker_name}")
-    print(f"   日志: {scanner_log_file}")
-    print(f"   使用 `{_cli_name()} check {worker_name}` 查看输出\n")
+    print(f"   日志: {keep_log_file}")
+    print(f"   使用 `{_cli_name()} check kai` 查看 kai 相关日志（scanner/keep 等）\n")
     
     # 构建命令
     sub_cmd = [sys.executable, "-m", "secretary.cli", "keep"] + args.goal
@@ -416,7 +375,7 @@ def cmd_keep(args):
     env["KAI_KEEP_BACKGROUND"] = "1"  # 标记为后台模式
     
     # 后台执行
-    fh = open(scanner_log_file, "a", encoding="utf-8")
+    fh = open(keep_log_file, "a", encoding="utf-8")
     fh.write(f"# Keep mode started: {goal[:100]}\n")
     fh.write(f"# Worker: {worker_name}\n")
     fh.write(f"# Started: {datetime.now().isoformat()}\n\n")
@@ -432,162 +391,7 @@ def cmd_keep(args):
     fh.close()
     
     print(f"✅ 持续监控模式已在后台启动 (PID={proc.pid})")
-    print(f"   使用 `{_cli_name()} check {worker_name}` 查看输出")
-    
-    # 1. 确保 worker 存在
-    worker = get_worker(worker_name)
-    if not worker:
-        print(f"ℹ️  Worker '{worker_name}' 不存在，自动创建并启动...")
-        register_worker(worker_name, description=f"持续监控模式: {goal[:50]}")
-        worker = get_worker(worker_name)
-        
-        # 自动启动 worker
-        print(f"🚀 自动启动 worker '{worker_name}'...")
-        start_worker_name = worker_name  # 局部变量，避免闭包问题
-        class StartArgs:
-            def __init__(self):
-                self.worker_name = start_worker_name
-                self.once = False
-        cmd_start(StartArgs())
-    
-    # 2. 检查 worker 是否在运行
-    if worker.get("pid"):
-        if _check_process_exists(worker["pid"]):
-            print(f"✅ Worker '{worker_name}' 正在运行 (PID={worker['pid']})")
-        else:
-            print(f"⚠️  Worker '{worker_name}' 的进程不存在，重新启动...")
-            start_worker_name = worker_name
-            class StartArgs:
-                def __init__(self):
-                    self.worker_name = start_worker_name
-                    self.once = False
-            cmd_start(StartArgs())
-    else:
-        print(f"⚠️  Worker '{worker_name}' 未运行，启动中...")
-        start_worker_name = worker_name
-        class StartArgs:
-            def __init__(self):
-                self.worker_name = start_worker_name
-                self.once = False
-        cmd_start(StartArgs())
-    
-    # 3. 保存持续目标到 worker 目录
-    goal_file = cfg.WORKERS_DIR / worker_name / "keep-goal.md"
-    goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
-    
-    # 4. 进入监控循环
-    scan_interval = 10  # 每 10 秒检查一次
-    print(f"\n📊 开始监控循环（每 {scan_interval} 秒检查一次）...")
-    print(f"   按 Ctrl+C 退出\n")
-    
-    try:
-        while True:
-            tasks_dir = _worker_tasks_dir(worker_name)
-            ongoing_dir = _worker_ongoing_dir(worker_name)
-            
-            # 检查 tasks 和 ongoing 是否都为空
-            tasks = list(tasks_dir.glob("*.md")) if tasks_dir.exists() else []
-            ongoing = list(ongoing_dir.glob("*.md")) if ongoing_dir.exists() else []
-            
-            if len(tasks) == 0 and len(ongoing) == 0:
-                # 生成新任务 - 让秘书读取状态并自己决定任务（类似 task 命令的逻辑）
-                print(f"\n📝 [{datetime.now().strftime('%H:%M:%S')}] 检测到任务队列为空，让秘书决定新任务...")
-                
-                # 收集已完成的任务信息（从 worker 的 stats 目录）
-                stats_dir = cfg.WORKERS_DIR / worker_name / "stats"
-                completed_tasks_info = []
-                if stats_dir.exists():
-                    # 读取 stats 目录中的报告文件
-                    for report_file in sorted(stats_dir.glob("*-stats.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-                        try:
-                            import json
-                            stats_data = json.loads(report_file.read_text(encoding="utf-8"))
-                            task_name = report_file.stem.replace("-stats", "")
-                            summary = stats_data.get("summary", "") if isinstance(stats_data, dict) else ""
-                            completed_tasks_info.append({
-                                "name": task_name,
-                                "summary": summary
-                            })
-                        except:
-                            pass
-                
-                # 如果没有 stats，尝试从全局 report 目录读取
-                if not completed_tasks_info:
-                    reports_dir = cfg.REPORT_DIR
-                    if reports_dir.exists():
-                        for report_file in sorted(reports_dir.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-                            try:
-                                content = report_file.read_text(encoding="utf-8")
-                                # 提取标题
-                                lines = content.splitlines()
-                                title = ""
-                                for line in lines[:10]:
-                                    if line.strip().startswith("#"):
-                                        title = line.strip().lstrip("#").strip()
-                                        break
-                                if not title:
-                                    title = report_file.stem.replace("-report", "")
-                                completed_tasks_info.append({
-                                    "name": title,
-                                    "summary": content[:300] if len(content) > 300 else content
-                                })
-                            except:
-                                pass
-                
-                # 构建已完成任务摘要
-                completed_summary = ""
-                if completed_tasks_info:
-                    completed_summary = "\n已完成的任务：\n"
-                    for i, task_info in enumerate(completed_tasks_info, 1):
-                        completed_summary += f"{i}. {task_info['name']}"
-                        if task_info.get('summary'):
-                            summary_text = task_info['summary'][:150] + "..." if len(task_info['summary']) > 150 else task_info['summary']
-                            completed_summary += f" - {summary_text}"
-                        completed_summary += "\n"
-                
-                # 构建请求（类似 task 命令，但包含持续目标和已完成任务信息）
-                # 秘书会通过 build_secretary_prompt 自动读取工人信息、任务概览、全局目标等
-                request = f"""【持续监控模式】当前任务队列为空，请基于以下信息决定下一步应该做什么：
-
-持续目标：{goal}
-{completed_summary}
-
-请分析持续目标和已完成的工作，决定下一步应该做什么来推进目标，并生成一个具体的、可执行的任务分配给 worker '{worker_name}'。"""
-                
-                # 调用秘书Agent（后台执行，输出到 secretary.log）
-                from secretary.secretary_agent import run_secretary
-                print(f"   🤖 让秘书分析状态并决定新任务...")
-                # 后台执行，输出到 secretary.log
-                secretary_log_file = cfg.BASE_DIR / "secretary.log"
-                secretary_log_file.parent.mkdir(parents=True, exist_ok=True)
-                
-                sub_cmd = [sys.executable, "-m", "secretary.cli", "task"] + request.split()
-                env = os.environ.copy()
-                env["PYTHONIOENCODING"] = "utf-8"
-                
-                fh = open(secretary_log_file, "a", encoding="utf-8")
-                fh.write(f"# Keep mode task generation: {request[:100]}\n")
-                fh.write(f"# Started: {datetime.now().isoformat()}\n\n")
-                fh.flush()
-                
-                subprocess.Popen(
-                    sub_cmd,
-                    stdout=fh,
-                    stderr=subprocess.STDOUT,
-                    cwd=str(cfg.BASE_DIR),
-                    env=env,
-                )
-                fh.close()
-                print(f"   ✅ 已提交给秘书，输出写入 secretary.log")
-            else:
-                status = f"待处理: {len(tasks)}, 执行中: {len(ongoing)}"
-                print(f"   [{datetime.now().strftime('%H:%M:%S')}] {status}", end="\r")
-            
-            time.sleep(scan_interval)
-            
-    except KeyboardInterrupt:
-        print(f"\n\n👋 退出持续监控模式")
-        print(f"   持续目标已保存: {goal_file}")
+    print(f"   使用 `{_cli_name()} check kai` 查看输出（keep 日志: {cfg.KAI_KEEP_LOG.name}）")
 
 
 # ============================================================
@@ -684,139 +488,126 @@ def cmd_skills(args):
 # ============================================================
 
 def cmd_hire(args):
-    """招募工作者 (只注册，不启动扫描)"""
+    """招募工作者 (只注册，不启动扫描)，支持多个名字"""
     from secretary.agents import pick_random_name, register_worker, get_worker
     import secretary.config as cfg
 
-    worker_name = getattr(args, "worker_name", None) or None
-    if not worker_name:
-        worker_name = pick_random_name()
-        print(f"🎲 随机招募: {worker_name}")
-    
-    # 检查 worker 是否已存在
-    existing = get_worker(worker_name)
-    if existing:
-        print(f"ℹ️  Worker '{worker_name}' 已存在")
+    names = getattr(args, "worker_names", None) or []
+    if not names:
+        names = [pick_random_name()]
+        print(f"🎲 随机招募: {names[0]}")
+    description = args.description if hasattr(args, "description") else ""
+
+    for worker_name in names:
+        existing = get_worker(worker_name)
+        if existing:
+            print(f"ℹ️  Worker '{worker_name}' 已存在")
+            print(f"   使用 `{_cli_name()} start {worker_name}` 启动扫描")
+            continue
+        register_worker(worker_name, description=description)
+        print(f"✅ 已招募 worker: {worker_name}")
         print(f"   使用 `{_cli_name()} start {worker_name}` 启动扫描")
-        return
-    
-    # 注册 worker（创建目录和注册信息）
-    register_worker(worker_name, description=args.description if hasattr(args, "description") else "")
-    print(f"✅ 已招募 worker: {worker_name}")
-    print(f"   使用 `{_cli_name()} start {worker_name}` 启动扫描")
 
 
 def cmd_start(args):
-    """启动 worker 的扫描器 (开始处理任务) - 后台执行"""
+    """启动 worker 的扫描器 (开始处理任务) - 后台执行，支持多个名字"""
     from secretary.agents import get_worker, _worker_logs_dir, update_worker_status
     import secretary.config as cfg
     import subprocess
     import os
 
-    worker_name = getattr(args, "worker_name", None) or None
-    if not worker_name:
-        worker_name = cfg.DEFAULT_WORKER_NAME
-    
-    # 特殊处理：如果 worker_name 是 "kai"，启动 kai 的扫描器
-    if worker_name.lower() == "kai":
-        # 确保 kai 目录存在
-        cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        scanner_log_file = cfg.KAI_LOGS_DIR / "scanner.log"
-        
-        # 直接运行 kai_scanner，但输出重定向到日志文件，并在后台执行
-        sub_cmd = [sys.executable, "-m", "secretary.kai_scanner"]
+    names = getattr(args, "worker_names", None) or []
+    if not names:
+        names = [cfg.DEFAULT_WORKER_NAME]
+
+    for worker_name in names:
+        # 特殊处理：如果 worker_name 是 "kai"，启动 kai 的扫描器
+        if worker_name.lower() == "kai":
+            cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            scanner_log_file = cfg.KAI_SCANNER_LOG
+
+            sub_cmd = [sys.executable, "-m", "secretary.kai_scanner"]
+            if args.once:
+                sub_cmd.append("--once")
+            sub_cmd.append("--verbose")
+
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUNBUFFERED"] = "1"
+            fh = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
+            proc = subprocess.Popen(
+                sub_cmd,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                cwd=cfg.BASE_DIR,
+                env=env,
+                bufsize=1,
+            )
+            print(f"✅ Kai 的扫描器已在后台启动 (PID={proc.pid})")
+            print(f"   日志: {scanner_log_file}")
+            print(f"   使用 `{_cli_name()} check kai` 查看输出")
+            print(f"   使用 `{_cli_name()} stop kai` 停止")
+            continue
+
+        worker = get_worker(worker_name)
+        if not worker:
+            print(f"❌ Worker '{worker_name}' 不存在")
+            print(f"   使用 `{_cli_name()} hire {worker_name}` 先招募 worker")
+            continue
+
+        if worker.get("pid") and _check_process_exists(worker["pid"]):
+            print(f"ℹ️  Worker '{worker_name}' 已在运行 (PID={worker['pid']})")
+            continue
+
+        log_dir = _worker_logs_dir(worker_name)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        scanner_log_file = log_dir / "scanner.log"
+
+        sub_cmd = [sys.executable, "-m", "secretary.scanner", "--worker", worker_name]
         if args.once:
             sub_cmd.append("--once")
-        sub_cmd.append("--verbose")  # kai_scanner 的 verbose 模式
-        
-        # 设置环境变量，确保 subprocess 使用 UTF-8 编码输出，并禁用缓冲
+        sub_cmd.append("--quiet")
+
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUNBUFFERED"] = "1"  # 禁用 Python 输出缓冲，确保实时输出
-        fh = open(scanner_log_file, "a", encoding="utf-8", buffering=1)  # line buffering
+        env["PYTHONUNBUFFERED"] = "1"
+        fh = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
         proc = subprocess.Popen(
             sub_cmd,
             stdout=fh,
             stderr=subprocess.STDOUT,
             cwd=cfg.BASE_DIR,
             env=env,
-            bufsize=1,  # line buffering
+            bufsize=1,
         )
-        print(f"✅ Kai 的扫描器已在后台启动 (PID={proc.pid})")
+        update_worker_status(worker_name, "busy", pid=proc.pid)
+        print(f"✅ Worker '{worker_name}' 已在后台启动 (PID={proc.pid})")
         print(f"   日志: {scanner_log_file}")
-        print(f"   使用 `{_cli_name()} check kai` 查看输出")
-        print(f"   使用 `{_cli_name()} stop kai` 停止")
-        return
-    
-    # 检查 worker 是否存在
-    worker = get_worker(worker_name)
-    if not worker:
-        print(f"❌ Worker '{worker_name}' 不存在")
-        print(f"   使用 `{_cli_name()} hire {worker_name}` 先招募 worker")
-        sys.exit(1)
-    
-    # 检查是否已经在运行
-    if worker.get("pid"):
-        if _check_process_exists(worker["pid"]):
-            print(f"ℹ️  Worker '{worker_name}' 已在运行 (PID={worker['pid']})")
-            return
-        # 进程不存在，清除过期的 PID（在后续启动时会自动更新）
-    
-    # 后台执行，输出到 scanner.log
-    log_dir = _worker_logs_dir(worker_name)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    # scanner 使用固定的日志文件（追加模式）
-    scanner_log_file = log_dir / "scanner.log"
-    
-    # 直接运行 scanner，但输出重定向到日志文件，并在后台执行
-    sub_cmd = [sys.executable, "-m", "secretary.scanner", "--worker", worker_name]
-    if args.once:
-        sub_cmd.append("--once")
-    sub_cmd.append("--quiet")  # scanner 的 quiet 模式
-    
-    # 设置环境变量，确保 subprocess 使用 UTF-8 编码输出，并禁用缓冲
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"  # 禁用 Python 输出缓冲，确保实时输出
-    fh = open(scanner_log_file, "a", encoding="utf-8", buffering=1)  # line buffering
-    proc = subprocess.Popen(
-        sub_cmd,
-        stdout=fh,
-        stderr=subprocess.STDOUT,
-        cwd=cfg.BASE_DIR,
-        env=env,
-        bufsize=1,  # line buffering
-    )
-    # 更新 worker 状态
-    update_worker_status(worker_name, "busy", pid=proc.pid)
-    print(f"✅ Worker '{worker_name}' 已在后台启动 (PID={proc.pid})")
-    print(f"   日志: {scanner_log_file}")
-    print(f"   使用 `{_cli_name()} check {worker_name}` 查看输出")
-    print(f"   使用 `{_cli_name()} stop {worker_name}` 停止")
+        print(f"   使用 `{_cli_name()} check {worker_name}` 查看输出")
+        print(f"   使用 `{_cli_name()} stop {worker_name}` 停止")
 
 
 def cmd_fire(args):
-    """解雇 (删除) 一个命名工人"""
+    """解雇 (删除) 一个或多个命名工人"""
     from secretary.agents import get_worker, remove_worker
 
-    worker_name = args.worker_name
-    info = get_worker(worker_name)
-    if not info:
-        print(f"❌ 没有叫 {worker_name} 的工人")
-        print(f"   用 `{_cli_name()} workers` 查看所有工人")
-        return
+    for worker_name in args.worker_names:
+        info = get_worker(worker_name)
+        if not info:
+            print(f"❌ 没有叫 {worker_name} 的工人")
+            print(f"   用 `{_cli_name()} workers` 查看所有工人")
+            continue
 
-    # 检查是否有正在执行的任务
-    if info.get("ongoing_count", 0) > 0:
-        print(f"⚠️  {worker_name} 还有 {info['ongoing_count']} 个任务在执行中!")
-        print(f"   建议先停止其进程再解雇")
+        if info.get("ongoing_count", 0) > 0:
+            print(f"⚠️  {worker_name} 还有 {info['ongoing_count']} 个任务在执行中!")
+            print(f"   建议先停止其进程再解雇")
 
-    success = remove_worker(worker_name)
-    if success:
-        print(f"🔥 已解雇工人: {worker_name}")
-        print(f"   已删除 {worker_name}/ 目录及注册信息")
-    else:
-        print(f"❌ 解雇失败: {worker_name}")
+        success = remove_worker(worker_name)
+        if success:
+            print(f"🔥 已解雇工人: {worker_name}")
+            print(f"   已删除 {worker_name}/ 目录及注册信息")
+        else:
+            print(f"❌ 解雇失败: {worker_name}")
 
 
 def cmd_workers(args):
@@ -919,35 +710,9 @@ def cmd_monitor(args):
         )
         return
 
-    # 检查是否在后台模式（子进程）
-    if os.environ.get("KAI_MONITOR_BACKGROUND") == "1":
-        run_monitor(refresh_interval=args.interval)
-        return
-
-    # 后台执行 TUI 监控
-    print(f"\n📺 启动监控面板（后台执行）")
-    print(f"   刷新间隔: {args.interval} 秒\n")
-
-    sub_cmd = [sys.executable, "-m", "secretary.cli", "monitor", "-i", str(args.interval)]
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["KAI_MONITOR_BACKGROUND"] = "1"
-
-    if sys.platform == "win32":
-        null_file = open(os.devnull, "w")
-    else:
-        null_file = open(os.devnull, "w")
-
-    proc = subprocess.Popen(
-        sub_cmd,
-        stdout=null_file,
-        stderr=subprocess.STDOUT,
-        cwd=str(cfg.BASE_DIR),
-        env=env,
-    )
-    null_file.close()
-
-    print(f"✅ 监控面板已在后台启动 (PID={proc.pid})")
+    # TUI 模式：前台执行（不 spawn 子进程），便于用户直接与面板交互
+    print(f"\n📺 启动监控面板（前台，刷新间隔 {args.interval}s，Ctrl+C 退出）\n")
+    run_monitor(refresh_interval=args.interval)
 
 
 # ============================================================
@@ -955,84 +720,70 @@ def cmd_monitor(args):
 # ============================================================
 
 def cmd_stop(args):
-    """停止指定 worker 或 kai 的进程"""
+    """停止指定 worker 或 kai 的进程，支持多个名字"""
     from secretary.agents import get_worker, update_worker_status
     import secretary.config as cfg
-    
-    worker_name = getattr(args, "worker_name", None)
-    if not worker_name:
-        print("❌ 请指定要停止的 worker 名称或 'kai'")
-        print(f"   用法: {_cli_name()} stop <worker_name>")
-        print(f"   示例: {_cli_name()} stop sen")
-        print(f"   示例: {_cli_name()} stop kai")
-        return
-    
-    # 特殊处理：停止 kai
-    if worker_name.lower() == "kai":
-        # 通过进程名称查找 kai 的扫描器进程
-        pid = None
-        try:
-            if sys.platform == "win32":
-                # Windows: 查找包含 kai_scanner 的进程
-                result = subprocess.run(
-                    ["wmic", "process", "where", "commandline like '%kai_scanner%'", "get", "processid"],
-                    capture_output=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    output = result.stdout.decode("gbk", errors="ignore")
-                    for line in output.splitlines():
-                        line = line.strip()
-                        if line and line.isdigit():
-                            pid = int(line)
-                            break
+
+    for worker_name in args.worker_names:
+        # 特殊处理：停止 kai
+        if worker_name.lower() == "kai":
+            pid = None
+            try:
+                if sys.platform == "win32":
+                    result = subprocess.run(
+                        ["wmic", "process", "where", "commandline like '%kai_scanner%'", "get", "processid"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0:
+                        output = result.stdout.decode("gbk", errors="ignore")
+                        for line in output.splitlines():
+                            line = line.strip()
+                            if line and line.isdigit():
+                                pid = int(line)
+                                break
+                else:
+                    result = subprocess.run(
+                        ["ps", "aux"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0:
+                        output = result.stdout.decode("utf-8", errors="ignore")
+                        for line in output.splitlines():
+                            if "kai_scanner" in line:
+                                parts = line.split()
+                                if len(parts) > 1:
+                                    try:
+                                        pid = int(parts[1])
+                                        break
+                                    except ValueError:
+                                        continue
+            except Exception as e:
+                print(f"   ⚠️  查找 kai 进程时出错: {e}")
+
+            if not pid:
+                print(f"ℹ️  Kai 的扫描器没有运行中的进程")
             else:
-                # Unix/Linux: 使用 ps 查找
-                result = subprocess.run(
-                    ["ps", "aux"],
-                    capture_output=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    output = result.stdout.decode("utf-8", errors="ignore")
-                    for line in output.splitlines():
-                        if "kai_scanner" in line:
-                            parts = line.split()
-                            if len(parts) > 1:
-                                try:
-                                    pid = int(parts[1])
-                                    break
-                                except ValueError:
-                                    continue
-        except Exception as e:
-            print(f"   ⚠️  查找 kai 进程时出错: {e}")
-        
+                print(f"\n🛑 停止 kai 的扫描器 (PID={pid})...")
+                _stop_process(pid, "kai")
+            continue
+
+        worker = get_worker(worker_name)
+        if not worker:
+            print(f"❌ Worker '{worker_name}' 不存在")
+            print(f"   使用 `{_cli_name()} workers` 查看所有 worker")
+            continue
+
+        pid = worker.get("pid")
         if not pid:
-            print(f"ℹ️  Kai 的扫描器没有运行中的进程")
-            return
-        
-        print(f"\n🛑 停止 kai 的扫描器 (PID={pid})...")
-        _stop_process(pid, "kai")
-        return
-    
-    # 检查 worker 是否存在
-    worker = get_worker(worker_name)
-    if not worker:
-        print(f"❌ Worker '{worker_name}' 不存在")
-        print(f"   使用 `{_cli_name()} workers` 查看所有 worker")
-        return
-    
-    # 检查是否有运行的进程
-    pid = worker.get("pid")
-    if not pid:
-        print(f"ℹ️  Worker '{worker_name}' 没有运行中的进程")
-        return
-    
-    print(f"\n🛑 停止 worker '{worker_name}' (PID={pid})...")
-    _stop_process(pid, worker_name)
-    # 更新 worker 状态
-    update_worker_status(worker_name, "idle", pid=None)
-    print(f"   📝 已更新 worker '{worker_name}' 状态为 idle，PID 已清除")
+            print(f"ℹ️  Worker '{worker_name}' 没有运行中的进程")
+            continue
+
+        print(f"\n🛑 停止 worker '{worker_name}' (PID={pid})...")
+        _stop_process(pid, worker_name)
+        update_worker_status(worker_name, "idle", pid=None)
+        print(f"   📝 已更新 worker '{worker_name}' 状态为 idle，PID 已清除")
 
 
 def _stop_process(pid: int, name: str):
@@ -1208,22 +959,33 @@ def cmd_check(args):
     
     worker_name = getattr(args, "worker_name", None)
     if not worker_name:
-        print("❌ 请指定要查看的 worker 名称或 'kai'")
-        print(f"   用法: {_cli_name()} check <worker_name>")
-        print(f"   示例: {_cli_name()} check sen")
-        print(f"   示例: {_cli_name()} check kai  (查看秘书日志)")
+        print("❌ 请指定要查看的对象: worker 名、kai 或 keep")
+        print(f"   用法: {_cli_name()} check <worker_name|kai|keep>")
+        print(f"   示例: {_cli_name()} check sen  |  {_cli_name()} check kai  |  {_cli_name()} check keep")
         return
     
-    # 检查是否是查看 kai 日志
+    # 检查是否是查看 kai 相关日志
     if worker_name.lower() == "kai":
-        log_file = cfg.KAI_LOGS_DIR / "scanner.log"
+        log_file = cfg.KAI_SCANNER_LOG
         if not log_file.exists():
-            print(f"❌ Kai 的日志文件不存在 (scanner.log)")
-            print(f"   文件路径: {log_file}")
-            print(f"   使用 `{_cli_name()} start kai` 启动 kai 的扫描器")
+            print(f"❌ Kai 的 scanner 日志不存在: {log_file.name}")
+            print(f"   路径: {log_file}")
+            print(f"   使用 `{_cli_name()} start kai` 启动 kai 的扫描器；keep 日志: `{_cli_name()} check keep`")
             return
-        print(f"\n📺 实时查看 kai 的输出")
-        print(f"   日志文件: {log_file}")
+        print(f"\n📺 实时查看 kai 的 scanner 输出")
+        print(f"   日志: {log_file}")
+        print(f"   按 'q' 退出查看模式")
+        print(f"   按 Ctrl+C 退出")
+        print(f"{'='*60}\n")
+    elif worker_name.lower() == "keep":
+        log_file = cfg.KAI_KEEP_LOG
+        if not log_file.exists():
+            print(f"❌ Keep 日志不存在: {log_file.name}")
+            print(f"   路径: {log_file}")
+            print(f"   使用 `{_cli_name()} keep \"目标\"` 启动持续监控后会产生此日志")
+            return
+        print(f"\n📺 实时查看 keep 模式输出")
+        print(f"   日志: {log_file}")
         print(f"   按 'q' 退出查看模式")
         print(f"   按 Ctrl+C 退出")
         print(f"{'='*60}\n")
@@ -1381,8 +1143,8 @@ def cmd_check(args):
         should_stop_worker.set()
         should_exit.set()
     
-    # 如果用户按了 Ctrl+C，停止 worker（仅当查看 worker 时）
-    if should_stop_worker.is_set() and worker_name.lower() != "kai":
+    # 如果用户按了 Ctrl+C，停止 worker（仅当查看普通 worker 时；kai/keep 不关联 PID）
+    if should_stop_worker.is_set() and worker_name.lower() not in ("kai", "keep"):
         print(f"\n\n🛑 正在停止 worker '{worker_name}' (PID={pid})...")
         # 调用 stop 命令的逻辑
         try:
@@ -2201,27 +1963,29 @@ def cmd_help(args):
   {name} stop alice
 """,
             "check": f"""
-📺 实时查看worker或秘书输出
+📺 实时查看 worker / kai / keep 的日志
 
 用法:
   {name} check <worker_name>
   {name} check kai
+  {name} check keep
   {name} check <worker_name> --tail 50
 
 说明:
-  实时查看后台运行的worker或秘书的输出日志（类似 tail -f）。
+  实时 tail 后台进程的日志。kai = agents/kai/logs/scanner.log；keep = agents/kai/logs/keep.log；worker = agents/<name>/logs/scanner.log。
 
 参数:
-  worker_name      要查看的worker名称或'kai' (必需)
-  --tail           只显示最后N行（默认显示所有内容）
+  worker_name      worker 名、kai 或 keep (必需)
+  --tail           只显示最后 N 行
 
 操作:
-  - 按 'q' 退出查看模式（不打断进程）
-  - 按 Ctrl+C 打断worker执行（仅当查看worker时）
+  - 按 'q' 退出查看（不打断进程）
+  - 按 Ctrl+C 退出；仅当查看普通 worker 时会同时停止该 worker
 
 示例:
-  {name} check sen          (查看worker输出)
-  {name} check kai          (查看秘书日志)
+  {name} check sen
+  {name} check kai
+  {name} check keep
   {name} check ykc --tail 100
 """,
             "clean-logs": f"""
@@ -2672,19 +2436,19 @@ def main():
 
     # ---- hire ----
     p = subparsers.add_parser("hire", help="👷 招募工作者 (只注册，不启动)")
-    p.add_argument("worker_name", nargs="?", default=None,
-                   help="工人名 (如 alice); 不填则随机取名")
+    p.add_argument("worker_names", nargs="*", default=None,
+                   help="工人名，可多个 (如 alice bob); 不填则随机取名一个")
     p.add_argument("-d", "--description", type=str, default="", help="工人描述")
 
     # ---- start ----
     p = subparsers.add_parser("start", help="🚀 启动 agent 扫描器 (开始处理任务)")
-    p.add_argument("worker_name", nargs="?", default=None,
-                   help="Agent名 (如 alice, kai); 不填则启动默认 agent (sen); 使用 'kai' 启动 kai 的扫描器")
+    p.add_argument("worker_names", nargs="*", default=None,
+                   help="Agent名，可多个 (如 alice bob kai); 不填则启动默认 agent (sen)")
     p.add_argument("--once", action="store_true", help="只执行一次")
 
     # ---- fire ----
-    p = subparsers.add_parser("fire", help="🔥 解雇一个工人")
-    p.add_argument("worker_name", help="要解雇的工人名 (如 alice)")
+    p = subparsers.add_parser("fire", help="🔥 解雇一个或多个工人")
+    p.add_argument("worker_names", nargs="+", help="要解雇的工人名，可多个 (如 alice bob)")
 
     # ---- workers ----
     subparsers.add_parser("workers", help="👷 列出所有已招募的工人")
@@ -2730,9 +2494,9 @@ def main():
 
     # ---- stop / check / clean-logs / clean-processes ----
     p = subparsers.add_parser("stop", help="🛑 停止指定 worker 的进程")
-    p.add_argument("worker_name", help="要停止的 worker 名称 (如 sen)")
-    p = subparsers.add_parser("check", help="📺 实时查看 worker 的输出")
-    p.add_argument("worker_name", help="要查看的 worker 名称 (如 sen)")
+    p.add_argument("worker_names", nargs="+", help="要停止的 worker 名称，可多个 (如 sen bob)")
+    p = subparsers.add_parser("check", help="📺 实时查看 worker/kai/keep 的日志输出")
+    p.add_argument("worker_name", help="worker 名 (如 sen)、kai（scanner 日志）或 keep（keep 模式日志）")
     p.add_argument("--tail", type=int, default=0, help="只显示最后 N 行（默认显示所有内容）")
     subparsers.add_parser("clean-logs", help="🧹 清理 logs/ 下的日志文件")
     subparsers.add_parser("clean-processes", help="🧹 清理泄露的 worker 进程记录")

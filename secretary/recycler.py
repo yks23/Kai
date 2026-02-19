@@ -1,5 +1,6 @@
 """
-回收者 Agent — 审查 Worker 的完成报告，判断任务是否真正完成
+回收者 Agent — 审查 Worker 的完成报告，判断任务是否真正完成。
+使用 agent_loop.run_loop 统一循环。
 
 ## Recycle 触发条件与 Unsolved 记录规则
 
@@ -28,45 +29,24 @@
   prompts/recycler.md
 """
 import shutil
-import time
 from pathlib import Path
 from datetime import datetime
 
 from secretary.config import (
     BASE_DIR, REPORT_DIR, STATS_DIR, SOLVED_DIR, UNSOLVED_DIR,
-    PROMPTS_DIR, RECYCLER_INTERVAL,
-    KAI_REPORTS_DIR, KAI_SOLVED_DIR, KAI_UNSOLVED_DIR,
+    RECYCLER_INTERVAL,
 )
+from secretary.agent_loop import run_loop, load_prompt
 from secretary.agent_runner import run_agent
-
-
-def _load_prompt_template() -> str:
-    """加载回收者提示词模板"""
-    tpl_path = PROMPTS_DIR / "recycler.md"
-    return tpl_path.read_text(encoding="utf-8")
 
 
 def _find_report_files() -> list[Path]:
     """
-    在 report/ 和 agents/kai/reports/ 中找到所有报告文件 (*-report.md)
-    排除统计文件 (*-stats.md)
+    在 agents/kai/report/ 中找到所有报告文件 (*-report.md)
     """
-    reports = []
-    
-    # 扫描普通 worker 的报告
-    if REPORT_DIR.exists():
-        reports.extend([
-            f for f in REPORT_DIR.glob("*-report.md")
-            if f.is_file()
-        ])
-    
-    # 扫描 kai 的报告
-    if KAI_REPORTS_DIR.exists():
-        reports.extend([
-            f for f in KAI_REPORTS_DIR.glob("*-report.md")
-            if f.is_file()
-        ])
-    
+    if not REPORT_DIR.exists():
+        return []
+    reports = [f for f in REPORT_DIR.glob("*-report.md") if f.is_file()]
     return sorted(reports, key=lambda p: p.stat().st_mtime)
 
 
@@ -87,18 +67,8 @@ def _get_related_files(report_file: Path) -> list[Path]:
 
 
 def _get_solved_unsolved_dirs(report_file: Path) -> tuple[Path, Path]:
-    """
-    根据报告文件的位置，返回对应的 solved 和 unsolved 目录
-    如果报告在 KAI_REPORTS_DIR，返回 KAI_SOLVED_DIR 和 KAI_UNSOLVED_DIR
-    否则返回 SOLVED_DIR 和 UNSOLVED_DIR
-    """
-    try:
-        # 检查报告文件是否在 kai 的 reports 目录下
-        report_file.resolve().relative_to(KAI_REPORTS_DIR.resolve())
-        return KAI_SOLVED_DIR, KAI_UNSOLVED_DIR
-    except (ValueError, AttributeError):
-        # 不在 kai 目录下，使用默认目录
-        return SOLVED_DIR, UNSOLVED_DIR
+    """报告与 solved/unsolved 均 under kai，统一返回 SOLVED_DIR、UNSOLVED_DIR。"""
+    return SOLVED_DIR, UNSOLVED_DIR
 
 
 def build_recycler_prompt(report_file: Path) -> str:
@@ -127,7 +97,7 @@ def build_recycler_prompt(report_file: Path) -> str:
     solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
     reason_filename = f"{task_name}-unsolved-reason.md"
 
-    template = _load_prompt_template()
+    template = load_prompt("recycler.md")
     return template.format(
         base_dir=BASE_DIR,
         report_file=report_file,
@@ -355,11 +325,7 @@ def run_recycler_once(verbose: bool = True) -> int:
 
 def run_recycler(once: bool = False, verbose: bool = True):
     """
-    运行回收者循环
-
-    Args:
-        once: 只执行一次
-        verbose: 详细输出
+    运行回收者循环（使用 agent_loop.run_loop）。
     """
     print("=" * 60)
     print("♻️  Secretary Recycler 启动")
@@ -370,31 +336,24 @@ def run_recycler(once: bool = False, verbose: bool = True):
     print(f"   模式: {'单次' if once else '持续运行'}")
     print("=" * 60)
 
-    cycle = 0
+    def process_fn(report_file: Path):
+        process_report(report_file, verbose=verbose)
 
-    try:
-        while True:
-            cycle += 1
-            ts = datetime.now().strftime("%H:%M:%S")
+    def on_idle():
+        if verbose:
+            print("♻️  回收者: report/ 中没有待审查的报告")
+            next_ts = datetime.now().strftime("%H:%M:%S")
+            print(f"💤 [{next_ts}] 下次检查在 {RECYCLER_INTERVAL}s 后...")
 
-            if verbose:
-                print(f"\n--- 回收者 第 {cycle} 轮 [{ts}] ---")
-
-            processed = run_recycler_once(verbose=verbose)
-
-            if verbose and processed > 0:
-                print(f"\n   📊 本轮处理了 {processed} 份报告")
-
-            if once:
-                break
-
-            if verbose:
-                next_ts = datetime.now().strftime("%H:%M:%S")
-                print(f"💤 [{next_ts}] 下次检查在 {RECYCLER_INTERVAL}s 后...")
-            time.sleep(RECYCLER_INTERVAL)
-
-    except KeyboardInterrupt:
-        print(f"\n\n🛑 回收者已停止 (共 {cycle} 个周期)")
+    run_loop(
+        trigger_fn=_find_report_files,
+        process_fn=process_fn,
+        interval_sec=RECYCLER_INTERVAL,
+        once=once,
+        label="回收者",
+        verbose=verbose,
+        on_idle=on_idle,
+    )
 
 
 if __name__ == "__main__":

@@ -15,14 +15,9 @@ Worker Agent — 真正执行任务的 Agent
 """
 from pathlib import Path
 
-from secretary.config import BASE_DIR, REPORT_DIR, PROMPTS_DIR
+from secretary.config import BASE_DIR, REPORT_DIR
+from secretary.agent_loop import load_prompt
 from secretary.agent_runner import run_agent
-
-
-def _load_template(name: str) -> str:
-    """加载 Worker 提示词模板"""
-    tpl_path = PROMPTS_DIR / name
-    return tpl_path.read_text(encoding="utf-8")
 
 
 def build_first_round_prompt(task_file: Path) -> str:
@@ -33,7 +28,7 @@ def build_first_round_prompt(task_file: Path) -> str:
     task_filename = task_file.name
     report_filename = task_filename.replace(".md", "") + "-report.md"
 
-    template = _load_template("worker_first_round.md")
+    template = load_prompt("worker_first_round.md")
     return template.format(
         base_dir=BASE_DIR,
         task_file=task_file,
@@ -48,7 +43,7 @@ def build_continue_prompt(task_file: Path) -> str:
     """
     续轮提示词 — 从模板加载，简短指令
     """
-    template = _load_template("worker_continue.md")
+    template = load_prompt("worker_continue.md")
     return template.format(
         task_file=task_file,
         report_dir=REPORT_DIR,
@@ -118,7 +113,7 @@ def build_refine_prompt(elapsed_sec: float, min_time: int) -> str:
     完善阶段提示词 — Agent 提前完成了但最低时间未到
     """
     remaining_sec = max(0, min_time - elapsed_sec)
-    template = _load_template("worker_refine.md")
+    template = load_prompt("worker_refine.md")
     return template.format(
         elapsed_sec=elapsed_sec,
         min_time=min_time,
