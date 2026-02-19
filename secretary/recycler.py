@@ -4,7 +4,7 @@
 ## Recycle 触发条件与 Unsolved 记录规则
 
 - **触发条件**: 回收者扫描 report/ 目录下的 *-report.md 文件，对每份报告调用
-  Cursor Agent 进行审查；审查标准为「任务是否真正完成」（文件是否存在、
+  Agent 进行审查；审查标准为「任务是否真正完成」（文件是否存在、
   代码是否合理、是否有遗漏等）。
 
 - **未满足则记入 unsolved**: 当审查判定为「未完成」时，必须在 unsolved 中记录该事件：
@@ -15,7 +15,7 @@
 
 工作逻辑:
   1. 扫描 report/ 中的 *-report.md 文件
-  2. 对每份报告，调用 Cursor Agent 进行审查
+  2. 对每份报告，调用 Agent 进行审查
   3. Agent 审查内容: 检查文件是否存在、代码是否合理、是否有遗漏
   4. 判定结果:
      - ✅ 已完成 → 将报告(+统计文件) 移动到 solved-report/
@@ -35,6 +35,7 @@ from datetime import datetime
 from secretary.config import (
     BASE_DIR, REPORT_DIR, STATS_DIR, SOLVED_DIR, UNSOLVED_DIR,
     PROMPTS_DIR, RECYCLER_INTERVAL,
+    KAI_REPORTS_DIR, KAI_SOLVED_DIR, KAI_UNSOLVED_DIR,
 )
 from secretary.agent_runner import run_agent
 
@@ -47,15 +48,25 @@ def _load_prompt_template() -> str:
 
 def _find_report_files() -> list[Path]:
     """
-    在 report/ 中找到所有 Worker 报告文件 (*-report.md)
+    在 report/ 和 agents/kai/reports/ 中找到所有报告文件 (*-report.md)
     排除统计文件 (*-stats.md)
     """
-    if not REPORT_DIR.exists():
-        return []
-    reports = [
-        f for f in REPORT_DIR.glob("*-report.md")
-        if f.is_file()
-    ]
+    reports = []
+    
+    # 扫描普通 worker 的报告
+    if REPORT_DIR.exists():
+        reports.extend([
+            f for f in REPORT_DIR.glob("*-report.md")
+            if f.is_file()
+        ])
+    
+    # 扫描 kai 的报告
+    if KAI_REPORTS_DIR.exists():
+        reports.extend([
+            f for f in KAI_REPORTS_DIR.glob("*-report.md")
+            if f.is_file()
+        ])
+    
     return sorted(reports, key=lambda p: p.stat().st_mtime)
 
 
@@ -73,6 +84,21 @@ def _get_related_files(report_file: Path) -> list[Path]:
         if f.exists():
             related.append(f)
     return related
+
+
+def _get_solved_unsolved_dirs(report_file: Path) -> tuple[Path, Path]:
+    """
+    根据报告文件的位置，返回对应的 solved 和 unsolved 目录
+    如果报告在 KAI_REPORTS_DIR，返回 KAI_SOLVED_DIR 和 KAI_UNSOLVED_DIR
+    否则返回 SOLVED_DIR 和 UNSOLVED_DIR
+    """
+    try:
+        # 检查报告文件是否在 kai 的 reports 目录下
+        report_file.resolve().relative_to(KAI_REPORTS_DIR.resolve())
+        return KAI_SOLVED_DIR, KAI_UNSOLVED_DIR
+    except (ValueError, AttributeError):
+        # 不在 kai 目录下，使用默认目录
+        return SOLVED_DIR, UNSOLVED_DIR
 
 
 def build_recycler_prompt(report_file: Path) -> str:
@@ -97,6 +123,8 @@ def build_recycler_prompt(report_file: Path) -> str:
     else:
         stats_section = "(无统计数据 — 此任务在统计功能上线前完成)\n"
 
+    # 根据报告文件位置确定 solved 和 unsolved 目录
+    solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
     reason_filename = f"{task_name}-unsolved-reason.md"
 
     template = _load_prompt_template()
@@ -105,8 +133,8 @@ def build_recycler_prompt(report_file: Path) -> str:
         report_file=report_file,
         report_content=report_content,
         stats_section=stats_section,
-        solved_dir=SOLVED_DIR,
-        unsolved_dir=UNSOLVED_DIR,
+        solved_dir=solved_dir,
+        unsolved_dir=unsolved_dir,
         stats_md=stats_md,
         stats_json=stats_json,
         reason_filename=reason_filename,
@@ -142,21 +170,22 @@ def process_report(report_file: Path, verbose: bool = True) -> bool:
 
     # 判断 Agent 的决策: 检查文件被移到了哪里
     # Agent 会自行执行 mv 命令来移动文件
+    solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
     report_gone = not report_file.exists()
-    in_solved = (SOLVED_DIR / report_file.name).exists()
-    in_unsolved = (UNSOLVED_DIR / report_file.name).exists()
+    in_solved = (solved_dir / report_file.name).exists()
+    in_unsolved = (unsolved_dir / report_file.name).exists()
 
     if in_solved:
         # 确保统计文件也被移走
-        _move_related_stats(report_file, SOLVED_DIR)
-        print(f"   ✅ 判定: 已完成 → solved-report/")
+        _move_related_stats(report_file, solved_dir)
+        print(f"   ✅ 判定: 已完成 → {solved_dir.name}/")
         return True
     elif in_unsolved:
         # 确保统计文件也被移走
-        _move_related_stats(report_file, UNSOLVED_DIR)
+        _move_related_stats(report_file, unsolved_dir)
         # 未满足完成条件时，必须在 unsolved 中记录该事件（含原因文件）
-        _ensure_unsolved_reason_record(task_name)
-        print(f"   ❌ 判定: 未完成 → unsolved-report/")
+        _ensure_unsolved_reason_record(task_name, unsolved_dir)
+        print(f"   ❌ 判定: 未完成 → {unsolved_dir.name}/")
         # 调用秘书重新提交任务，附带改进方向
         _resubmit_task(task_name, report_content=report_content, verbose=verbose)
         return True
@@ -183,13 +212,15 @@ def _move_related_stats(report_file: Path, dest_dir: Path):
                 pass  # Agent 可能已经移了
 
 
-def _ensure_unsolved_reason_record(task_name: str, reason_content: str | None = None) -> None:
+def _ensure_unsolved_reason_record(task_name: str, unsolved_dir: Path | None = None, reason_content: str | None = None) -> None:
     """
     确保 unsolved 中对该任务有明确记录：若不存在 *-unsolved-reason.md 则写入默认内容。
     满足「未满足条件时，将对应事件记录到 unsolved」的完整语义。
     """
-    UNSOLVED_DIR.mkdir(parents=True, exist_ok=True)
-    reason_file = UNSOLVED_DIR / f"{task_name}-unsolved-reason.md"
+    if unsolved_dir is None:
+        unsolved_dir = UNSOLVED_DIR
+    unsolved_dir.mkdir(parents=True, exist_ok=True)
+    reason_file = unsolved_dir / f"{task_name}-unsolved-reason.md"
     if reason_file.exists():
         return
     default = (
@@ -211,14 +242,15 @@ def _fallback_judgment(report_file: Path, agent_output: str, task_name: str,
     is_unsolved = "[判定: ❌" in agent_output or "未完成" in agent_output
 
     related = _get_related_files(report_file)
+    solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
 
     if is_unsolved:
         # 移动到 unsolved，并确保在 unsolved 中有记录（原因文件）
-        dest = UNSOLVED_DIR / report_file.name
-        UNSOLVED_DIR.mkdir(parents=True, exist_ok=True)
+        dest = unsolved_dir / report_file.name
+        unsolved_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(report_file), str(dest))
         for f in related:
-            shutil.move(str(f), str(UNSOLVED_DIR / f.name))
+            shutil.move(str(f), str(unsolved_dir / f.name))
         # 从 Agent 输出中尝试提取简要原因作为记录
         reason_from_output = ""
         if "[判定: ❌" in agent_output or "未完成" in agent_output:
@@ -230,19 +262,19 @@ def _fallback_judgment(report_file: Path, agent_output: str, task_name: str,
                         "# 下一步改进方向\n\n请根据上述原因与报告内容，给出可执行的改进步骤。\n"
                     )
                     break
-        _ensure_unsolved_reason_record(task_name, reason_content=reason_from_output or None)
+        _ensure_unsolved_reason_record(task_name, unsolved_dir=unsolved_dir, reason_content=reason_from_output or None)
         if verbose:
-            print(f"   ❌ 兜底判定: 未完成 → unsolved-report/")
+            print(f"   ❌ 兜底判定: 未完成 → {unsolved_dir.name}/")
         _resubmit_task(task_name, report_content=report_content, verbose=verbose)
         return True
     elif is_solved:
         # 移动到 solved
-        dest = SOLVED_DIR / report_file.name
+        dest = solved_dir / report_file.name
         shutil.move(str(report_file), str(dest))
         for f in related:
-            shutil.move(str(f), str(SOLVED_DIR / f.name))
+            shutil.move(str(f), str(solved_dir / f.name))
         if verbose:
-            print(f"   ✅ 兜底判定: 已完成 → solved-report/")
+            print(f"   ✅ 兜底判定: 已完成 → {solved_dir.name}/")
         return True
     else:
         # 无法判断 — 保留在 report/ 中，下次再审

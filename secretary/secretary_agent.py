@@ -1,8 +1,8 @@
 """
-秘书 Agent — 调用 Cursor Agent 来决定任务的归类、分配和写入
+秘书 Agent — 调用 Agent 来决定任务的归类、分配和写入
 
 工作逻辑:
-  用户输入任务描述 → 调用 cursor agent → agent 读取各工人 tasks/ 下现有文件
+  用户输入任务描述 → 调用 agent → agent 读取各工人 tasks/ 下现有文件
   → 决定: 归入已有文件 or 创建新文件 → 选择分配给哪个工人 → 写入对应 tasks/
   → 将本次决策摘要追加到 secretary_memory.md (记忆)
 
@@ -48,10 +48,57 @@ def _load_memory() -> str:
     return ""
 
 
+def get_goals() -> list:
+    """获取当前全局目标列表（供 CLI 列出）"""
+    if not getattr(cfg, "SECRETARY_GOALS_FILE", None) or not cfg.SECRETARY_GOALS_FILE.exists():
+        return []
+    text = cfg.SECRETARY_GOALS_FILE.read_text(encoding="utf-8")
+    goals = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # 只把列表项 "- xxx" 视为目标，忽略说明行
+        if line.startswith("- "):
+            goals.append(line[2:].strip())
+    return goals
+
+
+def set_goals(goals: list) -> None:
+    """将全局目标持久化到 secretary_goals.md（覆盖）"""
+    path = getattr(cfg, "SECRETARY_GOALS_FILE", None)
+    if not path:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not goals:
+        if path.exists():
+            path.unlink()
+        return
+    lines = ["# 当前全局目标\n", "以下目标在任务归类与分配时请与之对齐。\n\n"]
+    for g in goals:
+        g = (g or "").strip()
+        if g:
+            lines.append(f"- {g}\n")
+    path.write_text("".join(lines), encoding="utf-8")
+
+
+def clear_goals() -> None:
+    """清空当前全局目标"""
+    set_goals([])
+
+
+def _load_goals() -> str:
+    """加载全局目标文本（供注入到秘书提示词）"""
+    goals = get_goals()
+    if not goals:
+        return ""
+    return "\n".join(f"- {g}" for g in goals)
+
+
 def _load_workers_info() -> str:
     """加载工人信息摘要 (供秘书 Agent 分配任务)"""
     try:
-        from secretary.workers import build_workers_summary
+        from secretary.agents import build_workers_summary
         summary = build_workers_summary()
         return summary
     except Exception:
@@ -84,7 +131,7 @@ def _load_existing_tasks_summary() -> str:
 
     # 各工人 tasks/
     try:
-        from secretary.workers import list_workers, _worker_tasks_dir
+        from secretary.agents import list_workers, _worker_tasks_dir
         workers = list_workers()
         if not workers:
             return ""
@@ -150,13 +197,15 @@ def build_secretary_prompt(user_request: str) -> str:
             f"{memory}\n"
         )
 
-    # 2. 工人信息 (必须!)
+    # 2. 工人信息 (必须!) - 包含所有 worker 及其工作总结
     workers_info = _load_workers_info()
     workers_section = ""
     if workers_info:
         workers_section = (
-            "\n## 已招募的工人\n"
-            "以下是当前已招募的工人及其信息，**你必须**根据这些信息决定把任务分配给谁:\n\n"
+            "\n## 已招募的工人及其工作总结\n"
+            "以下是当前已招募的工人及其详细信息，**你必须**根据这些信息决定把任务分配给谁:\n"
+            "每个工人的工作总结（memory.md）包含了他们的工作历史、擅长方向、当前状态等。\n"
+            "请仔细阅读每个工人的工作总结，以便做出最合适的分配决策。\n\n"
             f"{workers_info}\n"
         )
     else:
@@ -190,14 +239,28 @@ def build_secretary_prompt(user_request: str) -> str:
             f"{tasks_overview}\n"
         )
 
+    # 5. 当前全局目标 (kai target 设定，归类与分配时与之对齐)
+    goals_text = _load_goals()
+    goals_section = ""
+    if goals_text:
+        goals_section = (
+            "\n## 当前全局目标\n"
+            "用户已设定以下全局目标，请在任务归类与分配时优先考虑与之对齐:\n\n"
+            f"{goals_text}\n"
+        )
+
     template = _load_prompt_template()
+    # 注意: 不再使用根目录的 tasks_dir，所有任务都分配到 worker 目录
+    # 这里保留 tasks_dir 参数用于提示词模板兼容，但实际应该使用 worker 目录
+    default_tasks_dir = cfg.WORKERS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"
     return template.format(
         base_dir=cfg.BASE_DIR,
-        tasks_dir=cfg.TASKS_DIR,
+        tasks_dir=str(default_tasks_dir),  # 提示词中显示默认 worker 的目录
         memory_section=memory_section,
         workers_section=workers_section,
         skills_section=skills_section,
         tasks_section=tasks_section,
+        goals_section=goals_section,
         user_request=user_request,
     )
 
@@ -216,7 +279,7 @@ def run_secretary(user_request: str, verbose: bool = True) -> bool:
 
         # 显示工人信息
         try:
-            from secretary.workers import list_workers
+            from secretary.agents import list_workers
             workers = list_workers()
             if workers:
                 names = [w["name"] for w in workers]
@@ -239,9 +302,14 @@ def run_secretary(user_request: str, verbose: bool = True) -> bool:
 
     prompt = build_secretary_prompt(user_request)
 
+    # 从设置中获取模型，如果没有设置则使用 Auto
+    from secretary.settings import get_model
+    model = get_model()
+    
     result = run_agent(
         prompt=prompt,
         workspace=str(cfg.BASE_DIR),
+        model=model,
         verbose=verbose,
     )
 

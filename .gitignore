@@ -9,3 +9,4 @@ unsolved-report/
 workers/
 *.json
 secretary_memory.md
+agents/

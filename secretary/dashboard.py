@@ -6,11 +6,29 @@ kai 实时监控面板 — 用 rich 实现美观的 TUI 监控
   - 最近活动日志
   - 自动刷新 (默认 2s)
   - q 退出
+  - 支持文本模式 (--text / --once)：输出与旧 status 等价的文本，无 TUI 时自动退化
 """
 import time
 import threading
+import sys
 from pathlib import Path
 from datetime import datetime
+
+# Windows 和 Unix 的键盘输入处理
+if sys.platform == "win32":
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+else:
+    try:
+        import select
+        import termios
+        import tty
+    except ImportError:
+        select = None
+        termios = None
+        tty = None
 
 from rich.console import Console
 from rich.live import Live
@@ -56,7 +74,7 @@ def _list_files(directory: Path, pattern: str = "*.md", limit: int = 5) -> list[
 def _count_workers() -> list[dict]:
     """采集所有命名工人的状态"""
     try:
-        from secretary.workers import list_workers
+        from secretary.agents import list_workers
         return list_workers()
     except Exception:
         return []
@@ -66,25 +84,33 @@ def collect_status() -> dict:
     """采集所有文件夹状态 (包括命名工人)"""
     workers = _count_workers()
 
-    # 全局任务数 + 所有工人的任务数总和
-    global_tasks = _count_files(cfg.TASKS_DIR)
-    global_ongoing = _count_files(cfg.ONGOING_DIR)
+    # 所有工人的任务数总和（不再有全局目录）
     worker_tasks = sum(w.get("pending_count", 0) for w in workers)
     worker_ongoing = sum(w.get("ongoing_count", 0) for w in workers)
 
+    # 收集所有 worker 的任务列表
+    from secretary.agents import _worker_tasks_dir, _worker_ongoing_dir
+    all_tasks_list = []
+    all_ongoing_list = []
+    for w in workers:
+        wtd = _worker_tasks_dir(w["name"])
+        wod = _worker_ongoing_dir(w["name"])
+        all_tasks_list.extend(_list_files(wtd))
+        all_ongoing_list.extend(_list_files(wod))
+
     return {
-        "tasks": global_tasks + worker_tasks,
-        "ongoing": global_ongoing + worker_ongoing,
-        "global_tasks": global_tasks,
-        "global_ongoing": global_ongoing,
+        "tasks": worker_tasks,
+        "ongoing": worker_ongoing,
+        "global_tasks": 0,  # 已废弃，保留用于兼容
+        "global_ongoing": 0,  # 已废弃，保留用于兼容
         "report": _count_files(cfg.REPORT_DIR, "*-report.md"),
         "solved": _count_files(cfg.SOLVED_DIR, "*-report.md"),
         "unsolved": _count_files(cfg.UNSOLVED_DIR, "*-report.md"),
         "stats": _count_files(cfg.STATS_DIR, "*-stats.json"),
         "workers": workers,
         # 详细列表
-        "tasks_list": _list_files(cfg.TASKS_DIR),
-        "ongoing_list": _list_files(cfg.ONGOING_DIR),
+        "tasks_list": all_tasks_list,
+        "ongoing_list": all_ongoing_list,
         "report_list": _list_files(cfg.REPORT_DIR, "*-report.md"),
         "solved_list": _list_files(cfg.SOLVED_DIR, "*-report.md", limit=3),
         "unsolved_list": _list_files(cfg.UNSOLVED_DIR, "*-report.md", limit=3),
@@ -360,36 +386,177 @@ def print_status_line():
 
 
 # ============================================================
+#  文本状态输出 (与旧 status 等价，供 monitor --text / 无 TUI 退化)
+# ============================================================
+
+def print_status_text():
+    """输出与旧 status 子命令等价的文本状态（供 kai monitor --text 或无 TUI 时使用）"""
+    from secretary.i18n import t
+    from secretary.settings import get_language
+    from secretary.agents import list_workers, _worker_tasks_dir, _worker_ongoing_dir
+    from secretary.skills import list_skills
+
+    name = get_cli_name()
+    print(f"\n📊 {name} {t('status_title')}")
+    print(f"   {t('status_workspace')}: {cfg.BASE_DIR}\n")
+
+    all_tasks = []
+    all_ongoing = []
+    for w in list_workers():
+        wtd = _worker_tasks_dir(w["name"])
+        if wtd.exists():
+            for f in wtd.glob("*.md"):
+                all_tasks.append((w["name"], f))
+        wod = _worker_ongoing_dir(w["name"])
+        if wod.exists():
+            for f in wod.glob("*.md"):
+                all_ongoing.append((w["name"], f))
+
+    count_suffix = f" {t('status_count')}" if get_language() == "zh" else ""
+    print(f"📂 {t('status_pending')}: {len(all_tasks)}{count_suffix}")
+    for worker_name, f in all_tasks:
+        print(f"   • [{worker_name}] {f.name}")
+
+    print(f"\n⚙️  {t('status_ongoing')}: {len(all_ongoing)}{count_suffix}")
+    for worker_name, f in all_ongoing:
+        print(f"   • [{worker_name}] {f.name}")
+
+    reports = sorted(cfg.REPORT_DIR.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    stats_files = list(cfg.STATS_DIR.glob("*-stats.json"))
+    stats_names = {f.stem.replace("-stats", "") for f in stats_files}
+    reports_suffix = " 份报告" if get_language() == "zh" else " report(s)"
+    print(f"\n📄 {t('status_reports')}: {len(reports)}{reports_suffix}")
+    for f in reports[:10]:
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")
+        task_name = f.stem.replace("-report", "")
+        has_stats = "📊" if task_name in stats_names else "  "
+        print(f"   {has_stats} [{mtime}] {f.name}")
+    if len(reports) > 10:
+        print(f"   ... 还有 {len(reports)-10} 个")
+
+    stats_count = len(stats_files)
+    stats_suffix = " 份" if get_language() == "zh" else ""
+    print(f"\n📊 {t('status_stats')}: {stats_count}{stats_suffix}")
+
+    solved = list(cfg.SOLVED_DIR.glob("*-report.md"))
+    solved_suffix = " 份" if get_language() == "zh" else ""
+    print(f"\n✅ {t('status_solved')}: {len(solved)}{solved_suffix}")
+    for f in sorted(solved, key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")
+        print(f"   • [{mtime}] {f.name}")
+    if len(solved) > 5:
+        print(f"   ... 还有 {len(solved)-5} 个")
+
+    unsolved = list(cfg.UNSOLVED_DIR.glob("*-report.md"))
+    unsolved_suffix = " 份" if get_language() == "zh" else ""
+    print(f"\n❌ {t('status_unsolved')}: {len(unsolved)}{unsolved_suffix}")
+    for f in sorted(unsolved, key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")
+        print(f"   • [{mtime}] {f.name}")
+        reason_file = cfg.UNSOLVED_DIR / f.name.replace("-report.md", "-unsolved-reason.md")
+        if reason_file.exists():
+            try:
+                reason = reason_file.read_text(encoding="utf-8").strip().splitlines()
+                if reason:
+                    print(f"     原因: {reason[0][:80]}")
+            except Exception:
+                pass
+
+    testcases = [f for f in cfg.TESTCASES_DIR.glob("*") if f.is_file()]
+    print(f"\n🧪 {t('status_testcases')}: {len(testcases)}{count_suffix}")
+    for f in testcases[:10]:
+        print(f"   • {f.name}")
+
+    workers = list_workers()
+    print(f"\n👷 {t('status_workers')}: {len(workers)}{count_suffix}")
+    for w in workers:
+        status_icon = {"idle": "💤", "busy": "⚙️", "offline": "📴"}.get(w.get("status", ""), "❓")
+        pid_str = f"PID={w['pid']}" if w.get("pid") else ""
+        completed = w.get("completed_tasks", 0)
+        pending = w.get("pending_count", 0)
+        ongoing = w.get("ongoing_count", 0)
+        if get_language() == "zh":
+            print(f"   {status_icon} {w['name']:15s}  完成:{completed:3d}  待处理:{pending}  执行中:{ongoing}  {pid_str}")
+        else:
+            print(f"   {status_icon} {w['name']:15s}  {t('status_completed')}:{completed:3d}  {t('status_pending_count')}:{pending}  {t('status_ongoing_count')}:{ongoing}  {pid_str}")
+
+    skills = list_skills()
+    print(f"\n📚 {t('status_skills')}: {len(skills)}{count_suffix}")
+    for s in skills[:10]:
+        tag = "📦" if s["builtin"] else "🎓"
+        print(f"   {tag} {s['name']}")
+    if len(skills) > 10:
+        print(f"   ... 还有 {len(skills)-10} 个")
+
+    logs = list(cfg.LOGS_DIR.glob("*.log")) if cfg.LOGS_DIR.exists() else []
+    print(f"\n📋 {t('status_logs')}: {len(logs)}{count_suffix}")
+
+    print(f"\n💡 {t('status_tips_workers')}:     {name} hire <名字> | {name} start <名字> | {name} fire <名字> | {name} workers")
+    print(f"💡 {t('status_tips_skills')}:     {name} skills | {name} <技能名> | {name} learn")
+    print(f"💡 {t('status_tips_services')}: start (工作者) | recycle (回收者)")
+    print(f"💡 {t('status_tips_settings')}:     {name} base <路径> | {name} name <新名字> | {name} model [模型名]")
+    print(f"💡 {t('status_tips_cleanup')}:     {name} clean-logs | {name} clean-processes")
+
+
+# ============================================================
 #  运行监控
 # ============================================================
 
-def run_monitor(refresh_interval: float = 2.0):
-    """启动实时监控面板 (阻塞), 按 q 退出"""
-    import select
-    import sys
-    import termios
-    import tty
+def run_monitor(refresh_interval: float = 2.0, text_mode: bool = False, once: bool = False):
+    """启动实时监控面板 (阻塞), 按 q 退出。text_mode/once 时或无可用时输出文本状态并返回。"""
+    if text_mode or once:
+        print_status_text()
+        return
+
+    # 无 TTY 时退化为文本输出（与旧 status 等价）
+    if not sys.stdout.isatty():
+        print_status_text()
+        return
 
     console = Console()
     stop = threading.Event()
 
-    # 后台线程: 非阻塞读取按键
+    # 后台线程: 非阻塞读取按键（Windows 兼容）
     def _key_listener():
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)  # cbreak 模式: 单字符读取, 不回显
+        if sys.platform == "win32" and msvcrt:
+            # Windows 使用 msvcrt
+            try:
+                while not stop.is_set():
+                    if msvcrt.kbhit():
+                        try:
+                            ch = msvcrt.getch().decode('utf-8').lower()
+                        except UnicodeDecodeError:
+                            # 处理特殊按键
+                            ch = msvcrt.getch()
+                            continue
+                        if ch == "q":
+                            stop.set()
+                            return
+                    time.sleep(0.2)
+            except Exception:
+                pass
+        elif select and termios and tty:
+            # Unix/Linux 使用 termios
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)  # cbreak 模式: 单字符读取, 不回显
+                while not stop.is_set():
+                    # select 等待 0.2s, 避免 busy-loop
+                    if select.select([sys.stdin], [], [], 0.2)[0]:
+                        ch = sys.stdin.read(1)
+                        if ch.lower() == "q":
+                            stop.set()
+                            return
+            except Exception:
+                pass
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        else:
+            # 降级：使用提示模式
+            console.print("[yellow]⚠️  键盘监听不可用，使用 Ctrl+C 退出[/]")
             while not stop.is_set():
-                # select 等待 0.2s, 避免 busy-loop
-                if select.select([sys.stdin], [], [], 0.2)[0]:
-                    ch = sys.stdin.read(1)
-                    if ch.lower() == "q":
-                        stop.set()
-                        return
-        except Exception:
-            pass
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                time.sleep(1)
 
     listener = threading.Thread(target=_key_listener, daemon=True)
     listener.start()
@@ -407,6 +574,10 @@ def run_monitor(refresh_interval: float = 2.0):
                     live.update(build_dashboard())
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # 无 rich 或 TUI 不可用时退化为文本输出
+        print_status_text()
+        return
     finally:
         stop.set()
         listener.join(timeout=1)

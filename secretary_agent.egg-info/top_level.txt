@@ -1,2 +1,0 @@
-secretary
-secretary_pkg

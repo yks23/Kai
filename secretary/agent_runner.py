@@ -1,5 +1,5 @@
 """
-Cursor Agent CLI 调用器
+Agent CLI 调用器
 
 使用 --output-format stream-json 获取结构化输出，解析:
   - tool_call 事件 (文件编辑、shell 命令等)
@@ -13,7 +13,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
-from secretary.config import CURSOR_BIN, DEFAULT_MODEL
+from secretary.config import DEFAULT_MODEL
 
 
 @dataclass
@@ -152,60 +152,152 @@ def run_agent(
     timeout: int | None = None,
     verbose: bool = True,
     continue_session: bool = False,
+    session_id: str = "",
 ) -> AgentResult:
     """
-    调用 Cursor Agent，使用 stream-json 获取结构化统计数据
+    调用 Agent，使用 stream-json 获取结构化统计数据
+
+    Args:
+        prompt: 提示词
+        workspace: 工作区路径
+        model: 模型名称
+        timeout: 超时时间（秒）
+        verbose: 是否显示详细信息
+        continue_session: 是否继续会话（使用 --continue，已废弃，优先使用 session_id）
+        session_id: 会话ID，如果提供则使用 --resume <session_id> 精确恢复会话
 
     Returns:
         AgentResult (包含 stats: RoundStats)
     """
-    cmd = [CURSOR_BIN, "agent", "--print", "--force", "--trust",
-           "--output-format", "stream-json"]
+    # 使用 agent 命令
+    from secretary.config import CURSOR_BIN, CURSOR_BIN_IS_PS
+    
+    # 在 Windows 上，如果通过 PowerShell 调用，需要特殊处理
+    if CURSOR_BIN_IS_PS:
+        # 通过 PowerShell 调用 agent，构建完整的命令字符串
+        agent_cmd_parts = ["agent", "--print", "--force", "--trust", "--output-format", "stream-json"]
+        
+        # 优先使用 session_id 精确恢复会话
+        if session_id:
+            agent_cmd_parts.extend(["--resume", session_id])
+        elif continue_session:
+            # 如果没有 session_id，回退到 --continue
+            agent_cmd_parts.append("--continue")
+        
+        if workspace:
+            agent_cmd_parts.extend(["--workspace", str(workspace)])
+        
+        effective_model = model or DEFAULT_MODEL
+        # 始终传递 --model 参数，包括 Auto
+        if effective_model:
+            agent_cmd_parts.extend(["--model", effective_model])
+        
+        agent_cmd_parts.append(prompt)
+        
+        # 构建 PowerShell 命令：powershell -Command "agent ..."
+        # 需要正确转义引号
+        agent_cmd_str = " ".join(f'"{arg}"' if ' ' in str(arg) or '"' in str(arg) else str(arg) for arg in agent_cmd_parts)
+        cmd = [CURSOR_BIN, "-NoProfile", "-Command", agent_cmd_str]
+    else:
+        # 直接调用 agent 命令（Unix/Linux 或 agent.cmd）
+        agent_bin = CURSOR_BIN
+        cmd = [agent_bin]
+        
+        # 添加参数（这些参数对于非交互式调用很重要）
+        cmd.extend(["--print", "--force", "--trust"])
+        
+        # output-format 用于获取结构化输出
+        cmd.extend(["--output-format", "stream-json"])
 
-    if continue_session:
-        cmd.append("--continue")
+        # 优先使用 session_id 精确恢复会话
+        if session_id:
+            cmd.extend(["--resume", session_id])
+        elif continue_session:
+            # 如果没有 session_id，回退到 --continue
+            cmd.append("--continue")
 
-    if workspace:
-        cmd.extend(["--workspace", str(workspace)])
+        if workspace:
+            cmd.extend(["--workspace", str(workspace)])
 
-    effective_model = model or DEFAULT_MODEL
-    if effective_model and effective_model.lower() != "auto":
-        cmd.extend(["--model", effective_model])
+        effective_model = model or DEFAULT_MODEL
+        # 始终传递 --model 参数，包括 Auto
+        if effective_model:
+            cmd.extend(["--model", effective_model])
 
-    cmd.append(prompt)
+        cmd.append(prompt)
 
     env = os.environ.copy()
     start = time.time()
     stats = RoundStats()
 
     if verbose:
-        mode = "续轮 --continue" if continue_session else "首轮"
-        print(f"  🤖 调用 Cursor Agent ({mode}) ...")
+        if session_id:
+            mode = f"续轮 --resume {session_id[:8]}..."
+        elif continue_session:
+            mode = "续轮 --continue"
+        else:
+            mode = "首轮"
+        print(f"  🤖 调用 Agent ({mode}) ...")
+        # 打印完整命令（包括参数）
+        cmd_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in cmd)
+        print(f"  📝 完整命令: {cmd_str}")
 
     try:
+        # 设置环境变量，确保输出使用 UTF-8 编码
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",  # 遇到编码错误时替换而不是失败
             env=env,
             cwd=workspace or None,
         )
 
         output_lines: list[str] = []
         raw_lines: list[str] = []
+        error_lines: list[str] = []  # 收集错误信息
+        warning_count = 0
         while True:
             line = proc.stdout.readline()
             if line == "" and proc.poll() is not None:
                 break
             if line:
                 raw_lines.append(line)
-                readable = _parse_stream_event(line.strip(), stats)
+                stripped = line.strip()
+                
+                # 检查是否是错误信息（Error: 开头或包含 Error）
+                if stripped.startswith("Error:") or (stripped and "Error:" in stripped):
+                    error_lines.append(stripped)
+                    if verbose:
+                        sys.stdout.write(f"  ❌ {stripped}\n")
+                        sys.stdout.flush()  # 实时刷新
+                    continue
+                
+                # 过滤掉警告信息
+                if stripped.startswith("Warning:") and "is not in the list of known options" in stripped:
+                    warning_count += 1
+                    if verbose:
+                        sys.stdout.write(f"  │ {stripped}\n")
+                        sys.stdout.flush()  # 实时刷新
+                    continue
+                
+                # 解析 stream-json 事件并输出
+                readable = _parse_stream_event(stripped, stats)
                 if readable:
                     output_lines.append(readable)
                     if verbose:
                         sys.stdout.write(f"  │ {readable}\n")
-                        sys.stdout.flush()
+                        sys.stdout.flush()  # 实时刷新，确保日志及时写入
+                elif stripped and not stripped.startswith("Warning:"):
+                    # 非 JSON 行且不是警告（可能是 agent 的其他输出），也记录
+                    if verbose:
+                        sys.stdout.write(f"  │ {stripped}\n")
+                        sys.stdout.flush()  # 实时刷新
 
         rc = proc.wait(timeout=timeout)
         dur = time.time() - start
@@ -217,12 +309,96 @@ def run_agent(
         full_output = "\n".join(output_lines)
         raw_full = "".join(raw_lines)  # 保留原始 stream-json 完整输出
 
+        # 如果有错误信息，优先显示
+        if error_lines:
+            error_summary = "\n".join(error_lines)
+            cmd_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in cmd)
+            return AgentResult(
+                False,
+                f"❌ Agent 执行出错:\n"
+                f"  命令: {cmd_str}\n"
+                f"  返回码: {rc}\n"
+                f"  错误信息: {error_summary}\n"
+                f"  完整输出: {raw_full[:500]}",
+                rc,
+                dur,
+                stats,
+                raw_full,
+            )
+
         if verbose:
             print(f"  ├─ 耗时: {stats.duration_sec:.1f}s | Tool calls: {stats.tool_call_count}"
                   f" | 文件: {len(stats.files_changed)} | Shell: {len(stats.shell_commands)}")
+            if warning_count > 0:
+                print(f"  ⚠️  检测到 {warning_count} 个参数警告（可能不影响功能）")
+
+        # 检查是否有实际的有效输出
+        has_valid_json = False
+        for line in raw_lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("Warning:"):
+                try:
+                    evt = json.loads(stripped)
+                    if evt.get("type") in ("system", "assistant", "tool_call", "result"):
+                        has_valid_json = True
+                        break
+                except json.JSONDecodeError:
+                    pass
+        
+        has_valid_output = (
+            stats.tool_call_count > 0 or 
+            stats.last_assistant_text or 
+            stats.session_id or
+            has_valid_json
+        )
+        
+        # 如果返回码非0，显示错误
+        if rc != 0:
+            cmd_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in cmd)
+            return AgentResult(
+                False,
+                f"❌ Agent 执行失败 (返回码: {rc})\n"
+                f"  命令: {cmd_str}\n"
+                f"  完整输出: {raw_full[:800]}",
+                rc,
+                dur,
+                stats,
+                raw_full,
+            )
+        
+        # 如果没有有效输出，但返回码是0，可能是参数不支持或需要交互式环境
+        # 注意：警告信息不影响功能，只要返回码是0且有警告，说明命令可能执行了
+        if rc == 0 and not has_valid_output and not full_output.strip():
+            cmd_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in cmd)
+            # 如果只有警告没有其他输出，可能是参数问题
+            if warning_count > 0 and len(raw_lines) <= warning_count + 1:
+                return AgentResult(
+                    False,
+                    f"⚠️ Agent 执行完成但没有有效输出。\n"
+                    f"  命令: {cmd_str}\n"
+                    f"  检测到 {warning_count} 个参数警告，这些参数可能不被当前版本支持。\n"
+                    f"  完整输出: {raw_full[:500]}",
+                    rc,
+                    dur,
+                    stats,
+                    raw_full,
+                )
+            else:
+                # 有其他输出但无法解析
+                return AgentResult(
+                    False,
+                    f"⚠️ Agent 执行完成但没有可解析的输出。\n"
+                    f"  命令: {cmd_str}\n"
+                    f"  返回码: {rc}\n"
+                    f"  完整输出: {raw_full[:500]}",
+                    rc,
+                    dur,
+                    stats,
+                    raw_full,
+                )
 
         return AgentResult(
-            success=(rc == 0),
+            success=(rc == 0 and has_valid_output),
             output=full_output,
             return_code=rc,
             duration=dur,
@@ -232,8 +408,17 @@ def run_agent(
 
     except subprocess.TimeoutExpired:
         proc.kill()
-        return AgentResult(False, f"⏰ 超时 ({timeout}s)", -1, time.time() - start, stats)
+        error_msg = f"⏰ 超时 ({timeout}s)"
+        if verbose:
+            print(f"  ❌ {error_msg}")
+        return AgentResult(False, error_msg, -1, time.time() - start, stats)
     except FileNotFoundError:
-        return AgentResult(False, f"❌ 找不到 cursor: {CURSOR_BIN}", -2, time.time() - start, stats)
+        error_msg = f"❌ 找不到 agent 命令: {agent_bin}\n  尝试设置环境变量 CURSOR_BIN 指定完整路径\n  例如: set CURSOR_BIN=agent.cmd 或 set CURSOR_BIN=C:\\path\\to\\agent.exe"
+        if verbose:
+            print(f"  ❌ {error_msg}")
+        return AgentResult(False, error_msg, -2, time.time() - start, stats)
     except Exception as e:
-        return AgentResult(False, f"❌ 异常: {e}", -3, time.time() - start, stats)
+        error_msg = f"❌ 调用 agent 时发生异常: {e}\n  命令: {' '.join(cmd)}"
+        if verbose:
+            print(f"  ❌ {error_msg}")
+        return AgentResult(False, error_msg, -3, time.time() - start, stats)

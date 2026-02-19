@@ -4,7 +4,7 @@
 技能 = 一个 Markdown 文件，存放在 skills/ 目录下，包含任务描述。
   - 内置技能 (evolving / analysis / debug) 首次运行时自动初始化
   - 用户通过 `kai learn "描述" skill-name` 可以教会新技能
-  - `kai <skill-name>` 直接把技能模板写入 tasks/ (跳过秘书 agent)
+  - `kai <skill-name>` 直接把技能模板写入 worker (sen) 的 tasks/ (跳过秘书 agent)
   - `kai forget <skill-name>` 忘掉一个技能
   - `kai skills` 列出所有技能
 """
@@ -156,20 +156,36 @@ def forget_skill(skill_name: str) -> bool:
 
 def invoke_skill(skill_name: str, min_time: int = 0) -> Path | None:
     """
-    使用一个技能: 把技能模板直接写入 tasks/ (跳过秘书 agent)
+    使用一个技能: 把技能模板直接写入 worker 的 tasks/ (跳过秘书 agent)
+    默认派发给 sen worker
     返回任务文件路径
     """
     from datetime import datetime
+    from secretary.agents import _worker_tasks_dir, register_worker
 
     prompt = get_skill_prompt(skill_name)
     if not prompt:
         return None
 
-    cfg.TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    # 确保默认 worker (sen) 已注册
+    register_worker(cfg.DEFAULT_WORKER_NAME, description="默认通用工人")
+    
+    # 使用默认 worker (sen) 的任务目录
+    default_tasks_dir = _worker_tasks_dir(cfg.DEFAULT_WORKER_NAME)
+    default_tasks_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    task_file = cfg.TASKS_DIR / f"{skill_name}-{ts}.md"
+    task_file = default_tasks_dir / f"{skill_name}-{ts}.md"
 
-    content = f"# {skill_name}\n\n{prompt}\n"
+    # 使用标准的任务文件格式
+    content = (
+        f"# 任务: {skill_name}\n\n"
+        f"## 描述\n"
+        f"{prompt}\n\n"
+        f"## 目标\n"
+        f"完成 {skill_name} 技能定义的任务\n\n"
+        f"## 工作区\n"
+        f"待指定\n"
+    )
     if min_time > 0:
         content += f"\n<!-- min_time: {min_time} -->\n"
     elif cfg.DEFAULT_MIN_TIME > 0:

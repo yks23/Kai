@@ -6,21 +6,19 @@
   任务文件可通过 <!-- execution_scope: monitor --> 等标注类型，未标注时视为 task。
 
 并发模型:
-  每个 `kai hire [name]` 启动一个 scanner 进程。多个进程可安全并行——
-  通过 .lock 文件实现互斥: 每个 scanner 每轮只抢一个任务，
-  抢到后创建 {task}.lock (原子操作, O_CREAT|O_EXCL)，完成后释放。
-  其他 scanner 看到 .lock 就跳过该任务。
+  每个 worker 有独立的目录 (workers/{name}/tasks 和 workers/{name}/ongoing)，
+  因此不需要锁机制。每个 worker 的 scanner 只处理自己目录中的任务。
 
 命名工人:
   `kai hire alice` 招募名为 alice 的工人。每个工人有专属目录:
-    {BASE_DIR}/alice/tasks/    — 秘书分配给 alice 的任务
-    {BASE_DIR}/alice/ongoing/  — alice 正在执行的任务
+    {BASE_DIR}/workers/alice/tasks/    — 秘书分配给 alice 的任务
+    {BASE_DIR}/workers/alice/ongoing/  — alice 正在执行的任务
   报告统一写入 {BASE_DIR}/report/。
-  未命名的 `kai hire` 使用全局 tasks/ 和 ongoing/。
+  未命名的 `kai hire` 使用默认 worker (sen)。
 
 工作流程:
 1. 持续扫描 tasks/ 和 ongoing/ 文件夹 (工人各扫各的目录)
-2. 每轮只抢一个未锁定的任务 → 加锁 → 处理 → 解锁
+2. 每轮处理一个任务
 3. 首轮调用 Worker Agent（完整提示词，新会话）
 4. Agent 自然停止后，检查 ongoing/ 中的文件是否还在
 5. 文件还在 → 用 --continue 续轮调用（Agent 保持上下文记忆）
@@ -44,10 +42,19 @@ from secretary.config import EXECUTABLE_TASK_TYPES
 from secretary.worker import run_worker_first_round, run_worker_continue, run_worker_refine
 from secretary.agent_runner import RoundStats
 
-# 当前 scanner 进程 ID (用于写入 lock 文件)
+# 确保输出实时刷新（用于后台运行时日志及时写入）
+# 创建一个带自动刷新的 print 函数
+_original_print = print
+def print(*args, **kwargs):
+    """重写 print 函数，默认 flush=True 确保实时输出"""
+    if 'flush' not in kwargs:
+        kwargs['flush'] = True
+    _original_print(*args, **kwargs)
+
+# 当前 scanner 进程 ID
 _PID = os.getpid()
 
-# 当前工人名 (None = 通用工人)
+# 当前工人名 (None = 使用默认 worker)
 _WORKER_NAME: str | None = None
 
 
@@ -55,82 +62,22 @@ _WORKER_NAME: str | None = None
 #  文件锁 — 多进程互斥
 # ============================================================
 
-def _lock_path(ongoing_file: Path) -> Path:
-    """获取任务的 lock 文件路径"""
-    return ongoing_file.with_suffix(".lock")
-
-
-def _try_lock(ongoing_file: Path) -> bool:
-    """
-    尝试获取任务的排他锁 (原子操作)。
-    成功返回 True，失败 (已被其他进程锁定) 返回 False。
-    """
-    lp = _lock_path(ongoing_file)
-    try:
-        fd = os.open(str(lp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        content = f"pid={_PID}\ntime={datetime.now().isoformat()}\n"
-        os.write(fd, content.encode())
-        os.close(fd)
-        return True
-    except FileExistsError:
-        return False
-    except OSError:
-        return False
-
-
-def _unlock(ongoing_file: Path):
-    """释放任务锁"""
-    lp = _lock_path(ongoing_file)
-    try:
-        lp.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _is_locked(ongoing_file: Path) -> bool:
-    """检查任务是否已被锁定"""
-    return _lock_path(ongoing_file).exists()
+# 锁机制已移除：每个 worker 有独立的目录，不需要锁
 
 
 def _get_tasks_dir() -> Path:
     """获取当前工人的 tasks 目录"""
-    if _WORKER_NAME:
-        return cfg.WORKERS_DIR / _WORKER_NAME / "tasks"
-    return cfg.TASKS_DIR
+    worker_name = _WORKER_NAME or cfg.DEFAULT_WORKER_NAME
+    return cfg.WORKERS_DIR / worker_name / "tasks"
 
 
 def _get_ongoing_dir() -> Path:
     """获取当前工人的 ongoing 目录"""
-    if _WORKER_NAME:
-        return cfg.WORKERS_DIR / _WORKER_NAME / "ongoing"
-    return cfg.ONGOING_DIR
+    worker_name = _WORKER_NAME or cfg.DEFAULT_WORKER_NAME
+    return cfg.WORKERS_DIR / worker_name / "ongoing"
 
 
-def _clean_stale_locks(directory: Path):
-    """
-    清理过期的 lock 文件。
-    如果 lock 文件中记录的 PID 已不存在 (进程已死)，则删除该 lock。
-    """
-    if not directory.exists():
-        return
-    for lock_file in directory.glob("*.lock"):
-        try:
-            content = lock_file.read_text(encoding="utf-8")
-            pid_line = [l for l in content.splitlines() if l.startswith("pid=")]
-            if pid_line:
-                pid = int(pid_line[0].split("=")[1])
-                # 检查进程是否存活
-                try:
-                    os.kill(pid, 0)  # signal 0: 仅检查进程是否存在
-                except ProcessLookupError:
-                    # 进程已死，清理 stale lock
-                    lock_file.unlink(missing_ok=True)
-                    task_name = lock_file.stem
-                    print(f"   🔓 清理过期锁: {task_name} (PID={pid} 已不存在)")
-                except PermissionError:
-                    pass  # 进程存在但无权限检查，保守保留 lock
-        except Exception:
-            pass
+# 锁机制已移除，不再需要清理锁文件
 
 
 # ============================================================
@@ -232,14 +179,20 @@ class TaskStats:
 
 def _write_scanner_report(task_stats: TaskStats):
     """
-    将 scanner 的调用统计写入 stats/ 文件夹
+    将 scanner 的调用统计写入 worker 的 stats/ 文件夹
 
     生成两个文件:
       - {task_name}-stats.md  — 可读的 Markdown 统计报告
       - {task_name}-stats.json — 结构化数据 (数字统计 + 完整对话日志)
     """
+    # 获取当前 worker 的 stats 目录
+    from secretary.agents import _worker_stats_dir
+    worker_name = _WORKER_NAME or cfg.DEFAULT_WORKER_NAME
+    stats_dir = _worker_stats_dir(worker_name)
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    
     # ---- Markdown 统计报告 ----
-    md_path = cfg.STATS_DIR / f"{task_stats.task_name}-stats.md"
+    md_path = stats_dir / f"{task_stats.task_name}-stats.md"
 
     lines = [
         f"# 📊 调用统计: {task_stats.task_name}\n",
@@ -291,7 +244,7 @@ def _write_scanner_report(task_stats: TaskStats):
     lines.append("## 每轮详情\n")
     for rd in task_stats.round_details:
         status = "✅" if rd["success"] else "❌"
-        round_type = "首轮 (新会话)" if rd["round"] == 1 else "续轮 (--continue)"
+        round_type = "首轮 (新会话)" if rd["round"] == 1 else "续轮 (--resume)"
         lines.append(f"### 第 {rd['round']} 轮 {status} — {round_type}\n")
         lines.append(f"- 时间: {rd.get('start_time', 'N/A')}")
         lines.append(f"- 耗时: {rd['duration_ms']}ms (API: {rd['api_duration_ms']}ms)")
@@ -312,7 +265,7 @@ def _write_scanner_report(task_stats: TaskStats):
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
     # ---- JSON 统计 + 完整对话日志 ----
-    json_path = cfg.STATS_DIR / f"{task_stats.task_name}-stats.json"
+    json_path = stats_dir / f"{task_stats.task_name}-stats.json"
     json_data = {
         # ---- 数字化统计 (顶部) ----
         "task_name": task_stats.task_name,
@@ -420,12 +373,18 @@ def _parse_min_time(task_file: Path) -> int:
 def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
     """
     持续调用 Worker Agent 直到它删除 ongoing/ 中的任务文件
+    
+    注意：verbose=True 时，所有输出（包括 agent 的对话过程）都会实时输出到 stdout/stderr
+    在后台运行时，这些输出会被重定向到日志文件，并实时刷新。
+    """
+    """
+    持续调用 Worker Agent 直到它删除 ongoing/ 中的任务文件
 
     第1轮: 全新会话 (完整提示词)
-    第2轮+: --continue 续轮 (Agent 有上一轮的完整记忆)
+    第2轮+: --resume 续轮 (使用 session_id 精确恢复会话，Agent 有上一轮的完整记忆)
 
     如果任务文件中嵌有 <!-- min_time: X --> 元数据，则即使 Agent 提前完成
-    (删除了任务文件)，也会通过 --continue 继续要求完善，直到累计墙钟时间
+    (删除了任务文件)，也会通过 --resume 继续要求完善，直到累计墙钟时间
     达到 min_time 秒。
 
     完成后写入调用统计报告。
@@ -468,22 +427,24 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
                 if elapsed >= min_time:
                     break
                 remaining = min_time - elapsed
-                print(f"\n--- 第 {round_num} 轮: 完善阶段 (--continue)"
+                print(f"\n--- 第 {round_num} 轮: 完善阶段 (--resume)"
                       f" | 已用 {elapsed:.0f}s / {min_time}s, 还需 {remaining:.0f}s ---")
                 result = run_worker_refine(
                     elapsed_sec=elapsed,
                     min_time=min_time,
                     verbose=verbose,
                     timeout_sec=round_timeout,
+                    session_id=task_stats.session_id,  # 使用保存的 session_id
                 )
             elif round_num == 1:
                 print(f"\n--- 第 1 轮: 首轮调用 (新会话) ---")
                 result = run_worker_first_round(ongoing_file, verbose=verbose,
                                                 timeout_sec=round_timeout)
             else:
-                print(f"\n--- 第 {round_num} 轮: 续轮调用 (--continue) ---")
+                print(f"\n--- 第 {round_num} 轮: 续轮调用 (--resume {task_stats.session_id[:8] if task_stats.session_id else 'N/A'}...) ---")
                 result = run_worker_continue(ongoing_file, verbose=verbose,
-                                             timeout_sec=round_timeout)
+                                             timeout_sec=round_timeout,
+                                             session_id=task_stats.session_id)  # 使用保存的 session_id
 
             # 记录本轮统计 + 对话日志
             task_stats.add_round(
@@ -524,7 +485,7 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
             if min_time > 0:
                 print(f"   ⏱️ 最低执行时间未到 ({elapsed:.0f}s / {min_time}s)，将续轮直至时间用尽或任务完成")
 
-            print(f"   {cfg.WORKER_RETRY_INTERVAL}s 后用 --continue 续轮...")
+            print(f"   {cfg.WORKER_RETRY_INTERVAL}s 后用 --resume 续轮...")
             time.sleep(cfg.WORKER_RETRY_INTERVAL)
 
         # 任务完成
@@ -570,13 +531,13 @@ def _print_report(task_name: str):
 # ============================================================
 
 def _pick_one_ongoing() -> Path | None:
-    """从 ongoing/ 中找一个可执行且未被锁定的任务，返回 None 表示都被占了"""
+    """从 ongoing/ 中找一个可执行的任务"""
     ongoing_dir = _get_ongoing_dir()
     if not ongoing_dir.exists():
         return None
     candidates = [
         f for f in sorted(ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
-        if _is_executable_task(f) and not _is_locked(f)
+        if _is_executable_task(f)
     ]
     return candidates[0] if candidates else None
 
@@ -595,9 +556,8 @@ def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | Non
     """
     运行主扫描循环。
 
-    支持多实例并行: 每个 `kai hire [name]` 启动一个 scanner 进程。
-    每轮只抢一个未锁定的任务处理，完成后再抢下一个。
-    多个 scanner 通过 .lock 文件互斥，不会重复执行同一任务。
+    每个 worker 有独立的目录，因此不需要锁机制。
+    每个 scanner 只处理自己 worker 目录中的任务。
 
     - worker_name: 工人名 (如 "alice")。有名字时扫描 {name}/tasks/ 和 {name}/ongoing/;
                    无名字时扫描全局 tasks/ 和 ongoing/。
@@ -605,7 +565,13 @@ def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | Non
     - once=True: 只执行一个周期后退出（用于测试或单次拉取）。
     """
     global _WORKER_NAME
+    # 如果 worker_name 是 None，使用默认 worker
+    if worker_name is None:
+        worker_name = cfg.DEFAULT_WORKER_NAME
     _WORKER_NAME = worker_name
+    
+    # 确定实际使用的 worker（包括默认 worker）
+    effective_worker = worker_name
 
     tasks_dir = _get_tasks_dir()
     ongoing_dir = _get_ongoing_dir()
@@ -614,20 +580,23 @@ def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | Non
     tasks_dir.mkdir(parents=True, exist_ok=True)
     ongoing_dir.mkdir(parents=True, exist_ok=True)
 
-    # 如果是命名工人，注册到 workers.json 并更新状态
-    if worker_name:
-        from secretary.workers import register_worker, update_worker_status
-        register_worker(worker_name)
-        update_worker_status(worker_name, "busy", pid=_PID)
+    # 确保 worker 已注册（包括默认 worker）
+    from secretary.agents import register_worker, update_worker_status
+    register_worker(effective_worker, description="通用工人" if not worker_name else "")
+    update_worker_status(effective_worker, "busy", pid=_PID)
 
-    label = f"👷 {worker_name}" if worker_name else "📡 通用 Worker"
+    label = f"👷 {effective_worker}"
 
+    # 获取 worker 的 stats 目录
+    from secretary.agents import _worker_stats_dir
+    worker_stats_dir = _worker_stats_dir(effective_worker)
+    
     print("=" * 60)
     print(f"{label} 启动  (PID={_PID})")
     print(f"   监控目录: {tasks_dir}")
     print(f"   执行目录: {ongoing_dir}")
     print(f"   报告目录: {cfg.REPORT_DIR}")
-    print(f"   统计目录: {cfg.STATS_DIR}")
+    print(f"   统计目录: {worker_stats_dir}")
     print(f"   扫描间隔: {cfg.SCAN_INTERVAL}s")
     print(f"   模式: {'单次' if once else '持续运行（循环直到 Ctrl+C）'}")
     if worker_name:
@@ -642,43 +611,22 @@ def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | Non
         while True:
             cycle += 1
             try:
-                # 清理过期的锁 (进程已死但 lock 没删)
-                _clean_stale_locks(ongoing_dir)
-
-                # 1. 优先处理 ongoing/ 中已有的任务 (抢一个未锁定的)
+                # 1. 优先处理 ongoing/ 中已有的任务
                 target = _pick_one_ongoing()
                 if target:
-                    if _try_lock(target):
-                        print(f"\n🔒 [{label} PID={_PID}] 锁定任务: {target.name}")
-                        try:
-                            process_ongoing_task(target, verbose=verbose)
-                            if worker_name:
-                                from secretary.workers import record_task_completion
-                                record_task_completion(worker_name, target.stem)
-                        finally:
-                            _unlock(target)
-                            print(f"   🔓 释放锁: {target.stem}")
-                    else:
-                        if verbose:
-                            print(f"   ⏭️ 任务 {target.name} 已被其他 Worker 锁定，跳过")
+                    print(f"\n📋 [{label} PID={_PID}] 处理任务: {target.name}")
+                    process_ongoing_task(target, verbose=verbose)
+                    from secretary.agents import record_task_completion
+                    record_task_completion(effective_worker, target.stem)
 
                 # 2. 如果 ongoing/ 没活了，从 tasks/ 拉新任务
                 elif not once or cycle == 1:
                     new_target = _pick_one_new()
                     if new_target:
-                        if _try_lock(new_target):
-                            print(f"\n🔒 [{label} PID={_PID}] 新任务: {new_target.name}")
-                            try:
-                                process_ongoing_task(new_target, verbose=verbose)
-                                if worker_name:
-                                    from secretary.workers import record_task_completion
-                                    record_task_completion(worker_name, new_target.stem)
-                            finally:
-                                _unlock(new_target)
-                                print(f"   🔓 释放锁: {new_target.stem}")
-                        else:
-                            if verbose:
-                                print(f"   ⏭️ 任务 {new_target.name} 已被其他 Worker 锁定")
+                        print(f"\n📋 [{label} PID={_PID}] 新任务: {new_target.name}")
+                        process_ongoing_task(new_target, verbose=verbose)
+                        from secretary.agents import record_task_completion
+                        record_task_completion(effective_worker, new_target.stem)
                     else:
                         if verbose:
                             ts = datetime.now().strftime("%H:%M:%S")
@@ -700,22 +648,13 @@ def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | Non
     except KeyboardInterrupt:
         print(f"\n\n🛑 {label} 已停止 (PID={_PID}, 共 {cycle} 个周期)")
     finally:
-        # 退出时清理本进程持有的所有锁
-        if ongoing_dir.exists():
-            for lock_file in ongoing_dir.glob("*.lock"):
-                try:
-                    content = lock_file.read_text(encoding="utf-8")
-                    if f"pid={_PID}" in content:
-                        lock_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
         # 更新工人状态
-        if worker_name:
-            try:
-                from secretary.workers import update_worker_status
-                update_worker_status(worker_name, "idle", pid=None)
-            except Exception:
-                pass
+        try:
+            from secretary.agents import update_worker_status
+            final_worker = worker_name or cfg.DEFAULT_WORKER_NAME
+            update_worker_status(final_worker, "idle", pid=None)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
@@ -723,5 +662,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="任务扫描器")
     parser.add_argument("--once", action="store_true", help="只执行一次")
     parser.add_argument("--quiet", action="store_true", help="安静模式")
+    parser.add_argument("--worker", type=str, default=None, help="worker 名称")
     args = parser.parse_args()
-    run_scanner(once=args.once, verbose=not args.quiet)
+    run_scanner(once=args.once, verbose=not args.quiet, worker_name=args.worker)

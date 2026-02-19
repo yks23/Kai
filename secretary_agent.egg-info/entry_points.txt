@@ -1,3 +1,0 @@
-[console_scripts]
-kai = secretary.cli:main
-secretary = secretary.cli:main

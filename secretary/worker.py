@@ -2,12 +2,12 @@
 Worker Agent — 真正执行任务的 Agent
 
 多轮对话机制:
-  第1轮 (首轮): 完整的任务提示词 → cursor agent --print --force --trust "..."
-  第2轮+ (续轮): 简短的继续指令 → cursor agent --print --force --trust --continue "..."
+  第1轮 (首轮): 完整的任务提示词 → agent --print --force --trust "..."
+  第2轮+ (续轮): 简短的继续指令 → agent --print --force --trust --resume <session_id> "..."
 
   Agent 自然停止 ≠ 任务完成。
   任务完成的唯一标志: Agent 主动删除 ongoing/ 中的任务文件。
-  只要文件还在，Scanner 就用 --continue 让 Agent 接续上下文继续工作。
+  只要文件还在，Scanner 就用 --resume <session_id> 让 Agent 精确恢复会话继续工作。
 
 提示词模板:
   prompts/worker_first_round.md
@@ -15,7 +15,7 @@ Worker Agent — 真正执行任务的 Agent
 """
 from pathlib import Path
 
-from secretary.config import BASE_DIR, ONGOING_DIR, REPORT_DIR, PROMPTS_DIR
+from secretary.config import BASE_DIR, REPORT_DIR, PROMPTS_DIR
 from secretary.agent_runner import run_agent
 
 
@@ -68,9 +68,14 @@ def run_worker_first_round(task_file: Path, workspace: str = "", verbose: bool =
 
     prompt = build_first_round_prompt(task_file)
 
+    # 从设置中获取模型
+    from secretary.settings import get_model
+    model = get_model()
+    
     return run_agent(
         prompt=prompt,
         workspace=workspace or str(BASE_DIR),
+        model=model,
         verbose=verbose,
         continue_session=False,
         timeout=timeout_sec,
@@ -78,22 +83,32 @@ def run_worker_first_round(task_file: Path, workspace: str = "", verbose: bool =
 
 
 def run_worker_continue(task_file: Path, workspace: str = "", verbose: bool = True,
-                        timeout_sec: int | None = None):
+                        timeout_sec: int | None = None, session_id: str = ""):
     """
-    续轮调用 Worker Agent — 用 --continue 接续上一轮对话
+    续轮调用 Worker Agent — 使用 session_id 精确恢复会话
 
-    timeout_sec: 单轮最长执行秒数，None 表示不限制。当任务设定了 min_time 时由 scanner 传入。
+    Args:
+        task_file: 任务文件路径
+        workspace: 工作区路径
+        verbose: 是否显示详细信息
+        timeout_sec: 单轮最长执行秒数，None 表示不限制。当任务设定了 min_time 时由 scanner 传入。
+        session_id: 会话ID，如果提供则使用 --resume <session_id> 精确恢复会话
     """
     if not workspace:
         workspace = _try_parse_workspace(task_file)
 
     prompt = build_continue_prompt(task_file)
 
+    # 从设置中获取模型
+    from secretary.settings import get_model
+    model = get_model()
+    
     return run_agent(
         prompt=prompt,
         workspace=workspace or str(BASE_DIR),
+        model=model,
         verbose=verbose,
-        continue_session=True,  # 关键: --continue
+        session_id=session_id,  # 使用 session_id 精确恢复会话
         timeout=timeout_sec,
     )
 
@@ -114,19 +129,30 @@ def build_refine_prompt(elapsed_sec: float, min_time: int) -> str:
 
 def run_worker_refine(elapsed_sec: float, min_time: int,
                       workspace: str = "", verbose: bool = True,
-                      timeout_sec: int | None = None):
+                      timeout_sec: int | None = None, session_id: str = ""):
     """
-    完善阶段调用 — Agent 已完成任务但最低执行时间未到，用 --continue 要求继续优化
-
-    timeout_sec: 单轮最长执行秒数，None 表示不限制。由 scanner 传入至少剩余 min_time 的时长。
+    完善阶段调用 — Agent 已完成任务但最低执行时间未到，使用 session_id 继续优化
+    
+    Args:
+        elapsed_sec: 已用时间（秒）
+        min_time: 最低执行时间（秒）
+        workspace: 工作区路径
+        verbose: 是否显示详细信息
+        timeout_sec: 超时时间（秒），None 表示不限制。由 scanner 传入至少剩余 min_time 的时长。
+        session_id: 会话ID，如果提供则使用 --resume <session_id> 精确恢复会话
     """
     prompt = build_refine_prompt(elapsed_sec, min_time)
 
+    # 从设置中获取模型
+    from secretary.settings import get_model
+    model = get_model()
+    
     return run_agent(
         prompt=prompt,
         workspace=workspace or str(BASE_DIR),
+        model=model,
         verbose=verbose,
-        continue_session=True,  # 接续之前的对话上下文
+        session_id=session_id,  # 使用 session_id 精确恢复会话
         timeout=timeout_sec,
     )
 
