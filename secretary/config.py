@@ -54,29 +54,8 @@ SKILLS_DIR = BASE_DIR / "skills"            # 学会的技能 (可复用任务�
 AGENTS_DIR = BASE_DIR / "agents"            # Agent 目录 (所有 agent 放在这里)
 AGENTS_FILE = AGENTS_DIR / "agents.json"    # Agent 注册表 (放在 agents/ 目录下)
 
-# ============ Kai 目录（报告、统计、日志、已解决/未解决均在此下）============
-KAI_DIR = AGENTS_DIR / "kai"                # Kai 目录
-KAI_TASKS_DIR = KAI_DIR / "tasks"           # Kai 待处理任务
-KAI_ASSIGNED_DIR = KAI_DIR / "assigned"     # Kai 已分配任务（从 tasks/ 移动过来）
-KAI_LOGS_DIR = KAI_DIR / "logs"             # Kai 日志目录
-
-# 报告与统计（统一放在 kai 下，不再使用工作区根目录的 report/stats）
-REPORT_DIR = KAI_DIR / "report"             # Worker 完成报告 (待回收者审查)
-KAI_REPORTS_DIR = KAI_DIR / "report"        # 与 REPORT_DIR 同一目录，供 recycler 判断用
-STATS_DIR = KAI_DIR / "stats"               # 调用统计 + 对话日志
-SOLVED_DIR = KAI_DIR / "solved-report"      # 已解决报告
-UNSOLVED_DIR = KAI_DIR / "unsolved-report"   # 未解决报告
-LOGS_DIR = KAI_LOGS_DIR                     # 日志（与 kai logs 一致，根目录不再使用 logs/）
-# Kai 日志文件（均在 KAI_LOGS_DIR 下）
-KAI_SCANNER_LOG = KAI_LOGS_DIR / "scanner.log"   # kai start kai 的扫描器输出
-KAI_SECRETARY_LOG = KAI_LOGS_DIR / "secretary.log"  # 经秘书提交任务的子进程输出（若有）
-KAI_KEEP_LOG = KAI_LOGS_DIR / "keep.log"         # kai keep 后台进程输出
-KAI_MEMORY_FILE = KAI_DIR / "memory.md"     # Kai 记忆文件
-KAI_GOALS_FILE = KAI_DIR / "goals.md"       # Kai 目标文件
-
-# 向后兼容：保留 WORKERS_DIR 和 WORKERS_FILE 作为别名
-WORKERS_DIR = AGENTS_DIR
-WORKERS_FILE = AGENTS_FILE
+# 注意：所有 agent 现在都使用 agents/<name>/ 结构
+# 不再需要硬编码 kai 路径
 
 # ============ Agent 配置 ============
 # 直接使用 agent 命令
@@ -107,14 +86,11 @@ EXECUTABLE_TASK_TYPES = ("task", "hire", "recycle")
 RECYCLER_INTERVAL = int(os.environ.get("RECYCLER_INTERVAL", "120"))  # 回收者扫描间隔(秒) = 2分钟
 
 TESTCASES_DIR = BASE_DIR / "testcases"  # 测试样例文件夹
-# 向后兼容：保留旧路径作为别名
-SECRETARY_MEMORY_FILE = KAI_MEMORY_FILE  # 秘书Agent记忆文件（已移动到 agents/kai/memory.md）
-SECRETARY_GOALS_FILE = KAI_GOALS_FILE    # 秘书全局目标（已移动到 agents/kai/goals.md）
 
 # ============ 执行方式与日志 ============
 # 前台执行：task, keep（仅 spawn 子进程后立即返回）, hire, fire, workers, monitor, report, base, name, model, target, help, check（tail -f）, stop, clean-*, skills, learn, forget, use
 # 后台执行（输出写日志）：start <worker|kai>, keep（子进程循环）, recycle
-# 日志路径：Kai 相关 → KAI_LOGS_DIR（scanner.log / secretary.log / keep.log）；Worker 相关 → agents/<name>/logs/scanner.log
+# 日志路径：所有 agent 相关 → agents/<name>/logs/scanner.log
 LONG_RUNNING_COMMANDS = frozenset({"start", "keep", "recycle", "monitor", "task"})
 
 # ============ 内置技能 (预设指令，自动初始化到 skills/) ============
@@ -151,41 +127,36 @@ def apply_base_dir(ws: Path):
     _self.SKILLS_DIR = ws / "skills"
     _self.AGENTS_DIR = ws / "agents"
     _self.AGENTS_FILE = _self.AGENTS_DIR / "agents.json"
-    _self.WORKERS_DIR = _self.AGENTS_DIR
-    _self.WORKERS_FILE = _self.AGENTS_FILE
-    _self.KAI_DIR = _self.AGENTS_DIR / "kai"
-    _self.KAI_TASKS_DIR = _self.KAI_DIR / "tasks"
-    _self.KAI_ASSIGNED_DIR = _self.KAI_DIR / "assigned"
-    _self.KAI_LOGS_DIR = _self.KAI_DIR / "logs"
-    # 报告、统计、已解决/未解决均 under kai
-    _self.REPORT_DIR = _self.KAI_DIR / "report"
-    _self.KAI_REPORTS_DIR = _self.KAI_DIR / "report"
-    _self.STATS_DIR = _self.KAI_DIR / "stats"
-    _self.SOLVED_DIR = _self.KAI_DIR / "solved-report"
-    _self.UNSOLVED_DIR = _self.KAI_DIR / "unsolved-report"
-    _self.LOGS_DIR = _self.KAI_LOGS_DIR
-    _self.KAI_SCANNER_LOG = _self.KAI_LOGS_DIR / "scanner.log"
-    _self.KAI_SECRETARY_LOG = _self.KAI_LOGS_DIR / "secretary.log"
-    _self.KAI_KEEP_LOG = _self.KAI_LOGS_DIR / "keep.log"
-    _self.KAI_MEMORY_FILE = _self.KAI_DIR / "memory.md"
-    _self.KAI_GOALS_FILE = _self.KAI_DIR / "goals.md"
-    # 向后兼容
-    _self.SECRETARY_MEMORY_FILE = _self.KAI_MEMORY_FILE
-    _self.SECRETARY_GOALS_FILE = _self.KAI_GOALS_FILE
 
 
 def ensure_dirs():
-    """确保所有运行时目录存在 (在 CLI 入口处调用)"""
-    for d in [REPORT_DIR, STATS_DIR,
-              SOLVED_DIR, UNSOLVED_DIR, TESTCASES_DIR, LOGS_DIR, SKILLS_DIR, AGENTS_DIR]:
+    """确保所有运行时目录存在 (在 CLI 入口处调用)。
+    Kai 目录只在 kai 已注册时才创建，避免未注册时自动创建目录。
+    """
+    for d in [TESTCASES_DIR, SKILLS_DIR, AGENTS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
     
-    # 确保 Kai 目录存在（含 report/stats/solved-report/unsolved-report/logs）
-    for d in [KAI_DIR, KAI_TASKS_DIR, KAI_ASSIGNED_DIR, REPORT_DIR,
-              STATS_DIR, SOLVED_DIR, UNSOLVED_DIR, KAI_LOGS_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
-    
-    # 确保 agents 目录和默认 agent 目录存在
+    # 确保 agents 目录存在
     AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    from secretary.agents import register_worker
-    register_worker(DEFAULT_WORKER_NAME, description="默认通用工人")
+    
+    # 为所有已注册的 secretary 类型 agent 创建目录（避免未注册时自动创建）
+    # 注意：agent的创建只在交互模式时检查，这里不自动创建
+    try:
+        from secretary.agents import list_workers
+        workers = list_workers()
+        for worker in workers:
+            if worker.get("type") == "secretary":
+                # 为 secretary 类型的 agent 创建目录
+                secretary_name = worker.get("name")
+                secretary_dir = AGENTS_DIR / secretary_name
+                for d in [
+                    secretary_dir,
+                    secretary_dir / "tasks",
+                    secretary_dir / "assigned",
+                    secretary_dir / "logs",
+                    secretary_dir / "stats",
+                ]:
+                    d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # 如果导入失败或检查失败，不创建目录（避免错误）
+        pass

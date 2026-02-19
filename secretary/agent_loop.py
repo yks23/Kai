@@ -25,6 +25,7 @@ def run_loop(
     verbose: bool = True,
     on_exit: Callable[[], None] | None = None,
     on_idle: Callable[[], None] | None = None,
+    log_file: str | None = None,
 ) -> None:
     """
     通用扫描循环：每轮调用 trigger_fn 取待处理项，对每项调用 process_fn，然后 sleep。
@@ -37,6 +38,7 @@ def run_loop(
     - verbose: 是否打印周期/异常等信息。
     - on_exit: 正常或 KeyboardInterrupt 退出时调用的回调（如 update_worker_status(idle)）。
     - on_idle: 当 trigger_fn 返回空列表时调用（可选，用于打印「无任务」等）。
+    - log_file: 可选的日志文件路径，用于写入错误信息。
     """
     cycle = 0
     try:
@@ -51,6 +53,21 @@ def run_loop(
                 if once:
                     break
             except Exception as e:
+                # 写入日志文件（如果提供）
+                if log_file:
+                    try:
+                        from datetime import datetime
+                        from pathlib import Path
+                        log_path = Path(log_file)
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(log_path, "a", encoding="utf-8") as log_f:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            log_f.write(f"\n[{ts}] ❌ 扫描循环异常 (周期 {cycle}): {e}\n")
+                            traceback.print_exc(file=log_f)
+                            log_f.flush()
+                    except Exception:
+                        pass  # 日志写入失败不影响处理
+                
                 if verbose:
                     traceback.print_exc()
                 # 单轮异常不退出，继续下一轮

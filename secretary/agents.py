@@ -34,14 +34,24 @@ PRESET_NAMES: list[str] = [
     "kaisen", "kaicheng", "mingyu", "zhenwei", "haoran",
     "tianyu", "junhao", "yifan", "ruoxi", "lingling",
     "xiaoming", "dazhuang", "xiaohu", "afei", "aniu",
+    "yichen", "zixuan", "yutong", "ruohan", "chenxi",
+    "yuxuan", "zihan", "yiran", "ruoyi", "chenhan",
     # 英文名
     "alice", "bob", "charlie", "diana", "eve",
     "frank", "grace", "henry", "iris", "jack",
     "kate", "leo", "mia", "noah", "olive",
     "paul", "quinn", "ruby", "sam", "tina",
+    "victor", "willa", "xander", "yara", "zoe",
+    "adam", "bella", "carlos", "daisy", "ethan",
+    "fiona", "george", "hannah", "ivan", "julia",
     # 有趣的代号
     "panda", "phoenix", "ninja", "rocket", "spark",
     "pixel", "byte", "nova", "echo", "flux",
+    "zen", "arc", "nex", "ion", "ray",
+    "max", "ace", "fox", "jet", "sky",
+    # 简短代号
+    "yks", "ykc", "ykx", "yky", "ykz",
+    "aks", "akc", "akx", "aky", "akz",
 ]
 
 
@@ -67,25 +77,38 @@ def _save_registry(registry: dict):
 
 
 def _worker_dir(worker_name: str) -> Path:
+    """获取 worker 的基础目录：agents/<name>"""
     return cfg.AGENTS_DIR / worker_name
 
 
 def _worker_tasks_dir(worker_name: str) -> Path:
+    """获取 worker 的 tasks 目录：agents/<name>/tasks"""
     return _worker_dir(worker_name) / "tasks"
 
 
+def _worker_assigned_dir(worker_name: str) -> Path:
+    """获取 agent 的 assigned 目录：agents/<name>/assigned（秘书类型使用）"""
+    return _worker_dir(worker_name) / "assigned"
+
+
 def _worker_ongoing_dir(worker_name: str) -> Path:
+    """获取 worker 的 ongoing 目录：agents/<name>/ongoing"""
     return _worker_dir(worker_name) / "ongoing"
 
 
 def _worker_logs_dir(worker_name: str) -> Path:
-    """获取 worker 的 logs 目录路径"""
+    """获取 worker 的 logs 目录路径：agents/<name>/logs"""
     return _worker_dir(worker_name) / "logs"
 
 
 def _worker_stats_dir(worker_name: str) -> Path:
-    """获取 worker 的 stats 目录路径"""
+    """获取 worker 的 stats 目录路径：agents/<name>/stats"""
     return _worker_dir(worker_name) / "stats"
+
+
+def _worker_reports_dir(worker_name: str) -> Path:
+    """获取 worker 的 reports 目录路径：agents/<name>/reports"""
+    return _worker_dir(worker_name) / "reports"
 
 
 def _worker_memory_file(worker_name: str) -> Path:
@@ -93,26 +116,106 @@ def _worker_memory_file(worker_name: str) -> Path:
     return _worker_dir(worker_name) / "memory.md"
 
 
+def load_agent_memory(agent_name: str) -> str:
+    """
+    加载agent的memory内容（通用函数，适用于所有agent类型）
+    
+    Returns:
+        memory内容，如果不存在或为空则返回空字符串
+    """
+    memory_file = _worker_memory_file(agent_name)
+    if memory_file.exists():
+        content = memory_file.read_text(encoding="utf-8").strip()
+        # 如果内容太长，只返回最近的部分
+        lines = content.splitlines()
+        if len(lines) > 200:
+            header = lines[:5]  # 保留前5行（标题和基本信息）
+            recent = lines[-195:]  # 保留最近195行
+            content = "\n".join(header + ["", "...(更早的记录已省略)...", ""] + recent)
+        return content
+    return ""
+
+
+def update_agent_memory(agent_name: str, summary: str, task_name: str | None = None):
+    """
+    更新agent的memory文件（通用函数，适用于所有agent类型）
+    
+    Args:
+        agent_name: agent名称
+        summary: 本次工作的简要总结
+        task_name: 任务名称（可选，用于记录）
+    """
+    memory_file = _worker_memory_file(agent_name)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 读取现有内容或创建新文件
+    if memory_file.exists():
+        content = memory_file.read_text(encoding="utf-8")
+    else:
+        # 创建基础结构
+        agent_dir = _worker_dir(agent_name)
+        content = (
+            f"# {agent_name} 的工作总结\n\n"
+            f"## 基本信息\n"
+            f"- 工作目录: `{agent_dir}`\n"
+            f"- 创建时间: {timestamp}\n\n"
+            f"## 工作总结\n\n"
+        )
+    
+    # 在"工作总结"部分追加新条目
+    if task_name:
+        new_entry = f"\n### [{timestamp}] 完成任务: {task_name}\n{summary}\n"
+    else:
+        new_entry = f"\n### [{timestamp}] 工作记录\n{summary}\n"
+    
+    # 查找"工作总结"部分的位置并插入新条目
+    if "## 工作总结" in content:
+        # 在"工作总结"标题后插入新条目（最新任务在最前面）
+        parts = content.split("## 工作总结", 1)
+        if len(parts) == 2:
+            header = parts[0] + "## 工作总结"
+            summary_section = parts[1].lstrip()
+            # 移除末尾的提示文字（如果存在）
+            if summary_section.startswith("（此文件由系统自动维护"):
+                summary_section = ""
+            content = header + "\n\n" + new_entry + (summary_section if summary_section else "")
+        else:
+            content += new_entry + "\n"
+    else:
+        # 如果没有"工作总结"部分，添加
+        content += "\n## 工作总结\n\n" + new_entry + "\n"
+    
+    memory_file.write_text(content, encoding="utf-8")
+
+
 # ============================================================
 #  CRUD
 # ============================================================
 
-def register_worker(worker_name: str, description: str = "") -> dict:
+def register_agent(agent_name: str, agent_type: str = "worker", description: str = "") -> dict:
     """
-    注册一个新 agent。创建专属目录 {name}/tasks 和 {name}/ongoing。
+    注册一个新 agent（统一接口，支持类型）。
+    创建专属目录 {name}/tasks 和 {name}/ongoing。
     返回 agent 信息字典。
     """
     reg = _load_registry()
 
-    if worker_name in reg["workers"]:
-        # 已存在，只更新描述 (如果有)
-        if description:
-            reg["workers"][worker_name]["description"] = description
-        _save_registry(reg)
-        return reg["workers"][worker_name]
+    if agent_name in reg["workers"]:
+        # 已存在，更新信息（确保type和description被更新）
+        updated = False
+        if description and reg["workers"][agent_name].get("description") != description:
+            reg["workers"][agent_name]["description"] = description
+            updated = True
+        if agent_type and reg["workers"][agent_name].get("type") != agent_type:
+            reg["workers"][agent_name]["type"] = agent_type
+            updated = True
+        if updated:
+            _save_registry(reg)
+        return reg["workers"][agent_name]
 
     info = {
-        "name": worker_name,
+        "name": agent_name,
+        "type": agent_type,      # secretary / worker / boss / recycler
         "description": description,
         "hired_at": datetime.now().isoformat(),
         "completed_tasks": 0,
@@ -121,35 +224,84 @@ def register_worker(worker_name: str, description: str = "") -> dict:
         "status": "idle",        # idle / busy / offline
         "pid": None,             # 运行时填入 scanner 的 PID
     }
-    reg["workers"][worker_name] = info
+    reg["workers"][agent_name] = info
     _save_registry(reg)
 
-    # 创建专属目录
-    _worker_tasks_dir(worker_name).mkdir(parents=True, exist_ok=True)
-    _worker_ongoing_dir(worker_name).mkdir(parents=True, exist_ok=True)
-    _worker_logs_dir(worker_name).mkdir(parents=True, exist_ok=True)
-    _worker_stats_dir(worker_name).mkdir(parents=True, exist_ok=True)
+    # 按 agent 类型只创建该类型需要的目录
+    _worker_tasks_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    _worker_logs_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    if agent_type == "secretary":
+        _worker_assigned_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    elif agent_type == "worker":
+        _worker_ongoing_dir(agent_name).mkdir(parents=True, exist_ok=True)
+        _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
+        _worker_stats_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    elif agent_type == "recycler":
+        recycler_dir = cfg.AGENTS_DIR / agent_name
+        (recycler_dir / "solved").mkdir(parents=True, exist_ok=True)
+        (recycler_dir / "unsolved").mkdir(parents=True, exist_ok=True)
+    elif agent_type == "boss":
+        _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
+        _worker_stats_dir(agent_name).mkdir(parents=True, exist_ok=True)
     
-    # 初始化 memory.md（如果不存在）
-    memory_file = _worker_memory_file(worker_name)
+    # 初始化 memory.md（如果不存在，为所有agent类型创建）
+    memory_file = _worker_memory_file(agent_name)
     if not memory_file.exists():
-        worker_dir = _worker_dir(worker_name)
-        tasks_dir = _worker_tasks_dir(worker_name)
-        ongoing_dir = _worker_ongoing_dir(worker_name)
-        memory_file.write_text(
-            f"# {worker_name} 的工作总结\n\n"
-            f"## 基本信息\n"
-            f"- 工作目录: `{worker_dir}`\n"
-            f"- 任务目录: `{tasks_dir}`\n"
-            f"- 执行目录: `{ongoing_dir}`\n"
-            f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"- **统计**: 已完成 0 个任务 | 待处理 0 个 | 执行中 0 个\n\n"
-            f"## 工作总结\n\n"
-            f"（此文件由系统自动维护，记录 {worker_name} 的工作历史和状态）\n",
-            encoding="utf-8"
-        )
+        agent_dir = _worker_dir(agent_name)
+        if agent_type == "worker":
+            tasks_dir = _worker_tasks_dir(agent_name)
+            ongoing_dir = _worker_ongoing_dir(agent_name)
+            memory_file.write_text(
+                f"# {agent_name} 的工作总结\n\n"
+                f"## 基本信息\n"
+                f"- 工作目录: `{agent_dir}`\n"
+                f"- 任务目录: `{tasks_dir}`\n"
+                f"- 执行目录: `{ongoing_dir}`\n"
+                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"- **统计**: 已完成 0 个任务 | 待处理 0 个 | 执行中 0 个\n\n"
+                f"## 工作总结\n\n"
+                f"（此文件由系统自动维护，记录 {agent_name} 的工作历史和状态）\n",
+                encoding="utf-8"
+            )
+        elif agent_type == "secretary":
+            memory_file.write_text(
+                f"# {agent_name} 的工作总结\n\n"
+                f"## 基本信息\n"
+                f"- 工作目录: `{agent_dir}`\n"
+                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"## 工作总结\n\n"
+                f"（此文件由系统自动维护，记录 {agent_name} 的任务分配历史）\n",
+                encoding="utf-8"
+            )
+        elif agent_type == "boss":
+            memory_file.write_text(
+                f"# {agent_name} 的工作总结\n\n"
+                f"## 基本信息\n"
+                f"- 工作目录: `{agent_dir}`\n"
+                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"## 工作总结\n\n"
+                f"（此文件由系统自动维护，记录 {agent_name} 的任务生成历史）\n",
+                encoding="utf-8"
+            )
+        elif agent_type == "recycler":
+            memory_file.write_text(
+                f"# {agent_name} 的工作总结\n\n"
+                f"## 基本信息\n"
+                f"- 工作目录: `{agent_dir}`\n"
+                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"## 工作总结\n\n"
+                f"（此文件由系统自动维护，记录 {agent_name} 的报告审查历史）\n",
+                encoding="utf-8"
+            )
 
     return info
+
+
+def register_worker(worker_name: str, description: str = "") -> dict:
+    """
+    向后兼容：注册worker（默认类型为worker）
+    """
+    return register_agent(worker_name, agent_type="worker", description=description)
 
 
 def remove_worker(worker_name: str) -> bool:
@@ -326,6 +478,33 @@ def get_worker_names() -> set[str]:
     return set(reg["workers"].keys())
 
 
+def get_all_running_pids() -> list[tuple[str, int]]:
+    """获取所有运行中的agent进程PID列表，返回[(agent_name, pid), ...]"""
+    reg = _load_registry()
+    running = []
+    for name, info in reg["workers"].items():
+        pid = info.get("pid")
+        if pid:
+            running.append((name, pid))
+    return running
+
+
+def stop_all_agents():
+    """停止所有运行中的agent进程（用于退出kai时清理）"""
+    from secretary.cli import _stop_process, _check_process_exists
+    running = get_all_running_pids()
+    if not running:
+        return
+    
+    print(f"\n🛑 停止所有运行中的agent进程...")
+    for name, pid in running:
+        if _check_process_exists(pid):
+            print(f"   停止 {name} (PID={pid})...")
+            _stop_process(pid, name)
+            update_worker_status(name, "idle", pid=None)
+    print(f"✅ 所有agent进程已停止")
+
+
 def pick_random_name() -> str:
     """
     从预设名字池中随机抽取一个尚未被使用的名字。
@@ -340,6 +519,37 @@ def pick_random_name() -> str:
     while f"worker-{i}" in used:
         i += 1
     return f"worker-{i}"
+
+
+def pick_available_name(preferred_names: list[str] | None = None) -> str:
+    """
+    智能选择可用名字，优先使用preferred_names，如果都被占用则从预设池中选择。
+    确保不会给同一个名字注册两个职业。
+    
+    Args:
+        preferred_names: 优先使用的名字列表（按优先级排序）
+    
+    Returns:
+        可用的名字
+    """
+    used = get_worker_names()
+    
+    # 如果有优先名字列表，先检查它们
+    if preferred_names:
+        for name in preferred_names:
+            if name not in used:
+                return name
+    
+    # 从预设池中选择
+    available = [n for n in PRESET_NAMES if n not in used]
+    if available:
+        return random.choice(available)
+    
+    # 名字池用完了，用编号
+    i = len(used) + 1
+    while f"agent-{i}" in used:
+        i += 1
+    return f"agent-{i}"
 
 
 def build_workers_summary() -> str:

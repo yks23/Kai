@@ -33,7 +33,7 @@ from pathlib import Path
 from datetime import datetime
 
 from secretary.config import (
-    BASE_DIR, REPORT_DIR, STATS_DIR, SOLVED_DIR, UNSOLVED_DIR,
+    BASE_DIR, AGENTS_DIR,
     RECYCLER_INTERVAL,
 )
 from secretary.agent_loop import run_loop, load_prompt
@@ -42,45 +42,110 @@ from secretary.agent_runner import run_agent
 
 def _find_report_files() -> list[Path]:
     """
-    在 agents/kai/report/ 中找到所有报告文件 (*-report.md)
+    从所有agent的reports目录中找到所有报告文件 (*-report.md)
+    返回格式: (report_file, agent_name) 的列表，但为了兼容性，只返回report_file
     """
-    if not REPORT_DIR.exists():
+    reports = []
+    
+    # 扫描所有agent目录
+    if not AGENTS_DIR.exists():
         return []
-    reports = [f for f in REPORT_DIR.glob("*-report.md") if f.is_file()]
+    
+    for agent_dir in AGENTS_DIR.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        # 跳过非agent目录（如果有）
+        if agent_dir.name.startswith('.'):
+            continue
+        
+        # 检查是否有reports目录
+        reports_dir = agent_dir / "reports"
+        if reports_dir.exists():
+            agent_reports = [f for f in reports_dir.glob("*-report.md") if f.is_file()]
+            reports.extend(agent_reports)
+    
     return sorted(reports, key=lambda p: p.stat().st_mtime)
 
 
 def _get_related_files(report_file: Path) -> list[Path]:
     """
-    获取与报告关联的统计文件 (在 stats/ 目录下)
-    例: foo-report.md → stats/foo-stats.md, stats/foo-stats.json
+    获取与报告关联的统计文件
+    例: agents/<name>/reports/foo-report.md → agents/<name>/stats/foo-stats.md
     """
     base_name = report_file.stem  # e.g. "foo-report"
     task_name = base_name.replace("-report", "")
 
     related = []
-    for suffix in ["-stats.md", "-stats.json"]:
-        f = STATS_DIR / f"{task_name}{suffix}"
-        if f.exists():
-            related.append(f)
+    
+    # 从报告文件所在目录推断agent目录
+    # 如果报告在 agents/<name>/reports/ 下，统计文件在 agents/<name>/stats/ 下
+    if "agents" in str(report_file) and "reports" in str(report_file):
+        # 提取agent目录路径
+        parts = report_file.parts
+        try:
+            agents_idx = parts.index("agents")
+            if agents_idx + 1 < len(parts):
+                agent_name = parts[agents_idx + 1]
+                agent_dir = AGENTS_DIR / agent_name
+                stats_dir = agent_dir / "stats"
+                for suffix in ["-stats.md", "-stats.json"]:
+                    f = stats_dir / f"{task_name}{suffix}"
+                    if f.exists():
+                        related.append(f)
+        except (ValueError, IndexError):
+            pass
+    
     return related
 
 
-def _get_solved_unsolved_dirs(report_file: Path) -> tuple[Path, Path]:
-    """报告与 solved/unsolved 均 under kai，统一返回 SOLVED_DIR、UNSOLVED_DIR。"""
-    return SOLVED_DIR, UNSOLVED_DIR
+def _get_recycler_dirs() -> tuple[Path, Path]:
+    """获取recycler的solved和unsolved目录"""
+    recycler_dir = AGENTS_DIR / "recycler"
+    solved_dir = recycler_dir / "solved"
+    unsolved_dir = recycler_dir / "unsolved"
+    solved_dir.mkdir(parents=True, exist_ok=True)
+    unsolved_dir.mkdir(parents=True, exist_ok=True)
+    return solved_dir, unsolved_dir
 
 
-def build_recycler_prompt(report_file: Path) -> str:
+def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") -> str:
     """
     构建回收者 Agent 的提示词
     """
     report_content = report_file.read_text(encoding="utf-8")
 
-    # 查找统计文件 (在 stats/ 目录下)
+    # 查找统计文件 (在对应agent的stats目录下)
     task_name = report_file.stem.replace("-report", "")
-    stats_md = STATS_DIR / f"{task_name}-stats.md"
-    stats_json = STATS_DIR / f"{task_name}-stats.json"
+    
+    # 从报告文件位置推断stats目录
+    stats_dir = None
+    if "agents" in str(report_file) and "reports" in str(report_file):
+        parts = report_file.parts
+        try:
+            agents_idx = parts.index("agents")
+            if agents_idx + 1 < len(parts):
+                agent_name = parts[agents_idx + 1]
+                agent_dir = AGENTS_DIR / agent_name
+                stats_dir = agent_dir / "stats"
+        except (ValueError, IndexError):
+            pass
+    
+    if stats_dir is None:
+        # 如果无法推断，使用报告文件所在agent的stats目录
+        # 从报告文件路径提取agent名称
+        parts = report_file.parts
+        try:
+            agents_idx = parts.index("agents")
+            if agents_idx + 1 < len(parts):
+                agent_name = parts[agents_idx + 1]
+                agent_dir = AGENTS_DIR / agent_name
+                stats_dir = agent_dir / "stats"
+        except (ValueError, IndexError):
+            # 如果还是无法推断，使用recycler自己的stats目录
+            stats_dir = AGENTS_DIR / "recycler" / "stats"
+    
+    stats_md = stats_dir / f"{task_name}-stats.md"
+    stats_json = stats_dir / f"{task_name}-stats.json"
 
     stats_section = ""
     if stats_md.exists():
@@ -93,9 +158,22 @@ def build_recycler_prompt(report_file: Path) -> str:
     else:
         stats_section = "(无统计数据 — 此任务在统计功能上线前完成)\n"
 
-    # 根据报告文件位置确定 solved 和 unsolved 目录
-    solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
+    # 使用recycler的solved和unsolved目录
+    solved_dir, unsolved_dir = _get_recycler_dirs()
     reason_filename = f"{task_name}-unsolved-reason.md"
+    
+    # 加载recycler的memory
+    from secretary.agents import load_agent_memory, _worker_memory_file
+    memory_content = load_agent_memory(recycler_name)
+    memory_file_path = _worker_memory_file(recycler_name)
+    memory_section = ""
+    if memory_content:
+        memory_section = (
+            "\n## 你的工作历史（Memory）\n"
+            "以下是你的工作总结，包含你之前审查的任务和经验：\n\n"
+            f"{memory_content}\n"
+        )
+    memory_file_path_section = f"`{memory_file_path}`" if memory_file_path else "未提供"
 
     template = load_prompt("recycler.md")
     return template.format(
@@ -107,11 +185,13 @@ def build_recycler_prompt(report_file: Path) -> str:
         unsolved_dir=unsolved_dir,
         stats_md=stats_md,
         stats_json=stats_json,
+        memory_section=memory_section,
+        memory_file_path=memory_file_path_section,
         reason_filename=reason_filename,
     )
 
 
-def process_report(report_file: Path, verbose: bool = True) -> bool:
+def process_report(report_file: Path, recycler_config=None, verbose: bool = True) -> bool:
     """
     对一份报告调用回收者 Agent 进行审查
 
@@ -119,6 +199,7 @@ def process_report(report_file: Path, verbose: bool = True) -> bool:
         True = 已处理 (无论判定结果), False = 处理失败
     """
     task_name = report_file.stem.replace("-report", "")
+    recycler_name = recycler_config.name if recycler_config else "recycler"
 
     # 先保存报告原文，稍后可能用于重新提交
     report_content = report_file.read_text(encoding="utf-8") if report_file.exists() else ""
@@ -126,7 +207,7 @@ def process_report(report_file: Path, verbose: bool = True) -> bool:
     if verbose:
         print(f"\n🔍 回收者审查: {report_file.name}")
 
-    prompt = build_recycler_prompt(report_file)
+    prompt = build_recycler_prompt(report_file, recycler_name=recycler_name)
 
     result = run_agent(
         prompt=prompt,
@@ -140,7 +221,7 @@ def process_report(report_file: Path, verbose: bool = True) -> bool:
 
     # 判断 Agent 的决策: 检查文件被移到了哪里
     # Agent 会自行执行 mv 命令来移动文件
-    solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
+    solved_dir, unsolved_dir = _get_recycler_dirs()
     report_gone = not report_file.exists()
     in_solved = (solved_dir / report_file.name).exists()
     in_unsolved = (unsolved_dir / report_file.name).exists()
@@ -149,6 +230,7 @@ def process_report(report_file: Path, verbose: bool = True) -> bool:
         # 确保统计文件也被移走
         _move_related_stats(report_file, solved_dir)
         print(f"   ✅ 判定: 已完成 → {solved_dir.name}/")
+        # 注意：memory的更新由agent自己决定，不在这里自动更新
         return True
     elif in_unsolved:
         # 确保统计文件也被移走
@@ -156,6 +238,7 @@ def process_report(report_file: Path, verbose: bool = True) -> bool:
         # 未满足完成条件时，必须在 unsolved 中记录该事件（含原因文件）
         _ensure_unsolved_reason_record(task_name, unsolved_dir)
         print(f"   ❌ 判定: 未完成 → {unsolved_dir.name}/")
+        # 注意：memory的更新由agent自己决定，不在这里自动更新
         # 调用秘书重新提交任务，附带改进方向
         _resubmit_task(task_name, report_content=report_content, verbose=verbose)
         return True
@@ -188,7 +271,7 @@ def _ensure_unsolved_reason_record(task_name: str, unsolved_dir: Path | None = N
     满足「未满足条件时，将对应事件记录到 unsolved」的完整语义。
     """
     if unsolved_dir is None:
-        unsolved_dir = UNSOLVED_DIR
+        _, unsolved_dir = _get_recycler_dirs()
     unsolved_dir.mkdir(parents=True, exist_ok=True)
     reason_file = unsolved_dir / f"{task_name}-unsolved-reason.md"
     if reason_file.exists():
@@ -212,7 +295,7 @@ def _fallback_judgment(report_file: Path, agent_output: str, task_name: str,
     is_unsolved = "[判定: ❌" in agent_output or "未完成" in agent_output
 
     related = _get_related_files(report_file)
-    solved_dir, unsolved_dir = _get_solved_unsolved_dirs(report_file)
+    solved_dir, unsolved_dir = _get_recycler_dirs()
 
     if is_unsolved:
         # 移动到 unsolved，并确保在 unsolved 中有记录（原因文件）
@@ -256,11 +339,14 @@ def _fallback_judgment(report_file: Path, agent_output: str, task_name: str,
 def _resubmit_task(task_name: str, report_content: str = "", verbose: bool = True):
     """
     调用秘书 Agent 重新提交未完成的任务，附带回收者的改进方向
+    支持多secretary选择
     """
-    from secretary.secretary_agent import run_secretary
+    from secretary.agents import list_workers
+    from secretary.cli import _write_kai_task, _select_secretary, _cli_name
 
     # 读取 unsolved 原因 + 改进方向
-    reason_file = UNSOLVED_DIR / f"{task_name}-unsolved-reason.md"
+    _, unsolved_dir = _get_recycler_dirs()
+    reason_file = unsolved_dir / f"{task_name}-unsolved-reason.md"
     reason = ""
     if reason_file.exists():
         reason = reason_file.read_text(encoding="utf-8").strip()
@@ -296,7 +382,24 @@ def _resubmit_task(task_name: str, report_content: str = "", verbose: bool = Tru
             preview = direction_lines[:3]
             print(f"   📋 改进方向: {' | '.join(preview)}")
 
-    run_secretary(resubmit_request, verbose=verbose)
+    # 选择secretary（支持多secretary场景）
+    secretaries = [w for w in list_workers() if w.get("type") == "secretary"]
+    if len(secretaries) == 0:
+        if verbose:
+            print(f"   ⚠️ 没有可用的secretary agent，无法重新提交任务")
+        return
+    elif len(secretaries) == 1:
+        secretary_name = secretaries[0]["name"]
+    else:
+        # 多个secretary，使用第一个（或可以改进为让用户选择）
+        secretary_name = secretaries[0]["name"]
+        if verbose:
+            print(f"   ℹ️ 检测到多个secretary，使用: {secretary_name}")
+    
+    # 将重新提交请求写入secretary的tasks目录
+    _write_kai_task(resubmit_request, min_time=0, secretary_name=secretary_name)
+    if verbose:
+        print(f"   ✅ 已提交到 {secretary_name} 的任务队列")
 
 
 def run_recycler_once(verbose: bool = True) -> int:
@@ -327,11 +430,12 @@ def run_recycler(once: bool = False, verbose: bool = True):
     """
     运行回收者循环（使用 agent_loop.run_loop）。
     """
+    solved_dir, unsolved_dir = _get_recycler_dirs()
     print("=" * 60)
-    print("♻️  Secretary Recycler 启动")
-    print(f"   报告目录: {REPORT_DIR}")
-    print(f"   已解决: {SOLVED_DIR}")
-    print(f"   未解决: {UNSOLVED_DIR}")
+    print("♻️  Recycler Agent 启动")
+    print(f"   扫描目录: 所有agent的reports/目录")
+    print(f"   已解决: {solved_dir}")
+    print(f"   未解决: {unsolved_dir}")
     print(f"   检查间隔: {RECYCLER_INTERVAL}s ({RECYCLER_INTERVAL // 60}分钟)")
     print(f"   模式: {'单次' if once else '持续运行'}")
     print("=" * 60)
@@ -341,7 +445,7 @@ def run_recycler(once: bool = False, verbose: bool = True):
 
     def on_idle():
         if verbose:
-            print("♻️  回收者: report/ 中没有待审查的报告")
+            print("♻️  Recycler: 没有待审查的报告")
             next_ts = datetime.now().strftime("%H:%M:%S")
             print(f"💤 [{next_ts}] 下次检查在 {RECYCLER_INTERVAL}s 后...")
 

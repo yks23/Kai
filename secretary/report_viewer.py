@@ -107,9 +107,11 @@ def _collect_worker_tasks(worker_name: str) -> list[dict]:
                 "content": content,
             })
     
-    # 3. 已完成报告
-    if cfg.REPORT_DIR.exists():
-        for report_file in cfg.REPORT_DIR.glob("*-report.md"):
+    # 3. 已完成报告（从worker自己的reports目录读取）
+    from secretary.agents import _worker_reports_dir
+    reports_dir = _worker_reports_dir(worker_name)
+    if reports_dir.exists():
+        for report_file in reports_dir.glob("*-report.md"):
             task_name = report_file.stem.replace("-report", "")
             mtime = report_file.stat().st_mtime
             try:
@@ -137,9 +139,11 @@ def _collect_worker_tasks(worker_name: str) -> list[dict]:
                 "content": content,
             })
     
-    # 4. 已解决报告
-    if cfg.SOLVED_DIR.exists():
-        for report_file in cfg.SOLVED_DIR.glob("*-report.md"):
+    # 4. 已解决报告（从recycler的solved目录读取）
+    recycler_dir = cfg.AGENTS_DIR / "recycler"
+    solved_dir = recycler_dir / "solved"
+    if solved_dir.exists():
+        for report_file in solved_dir.glob("*-report.md"):
             task_name = report_file.stem.replace("-report", "")
             mtime = report_file.stat().st_mtime
             try:

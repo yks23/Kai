@@ -13,15 +13,14 @@ Kai — CLI 入口（基于 Cursor Agent 的自动化任务系统）
   kai monitor / stop / clean-logs
   kai base ./          设定工作区为当前目录
   kai name lily        给我改个名字叫 lily
-  kai target 任务1 任务2  设定秘书全局目标
-  kai target --clear   清空全局目标
-  kai target           列出当前全局目标
+  kai target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
 """
 import argparse
 import os
 import shlex
 import subprocess
 import sys
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 
@@ -69,22 +68,317 @@ def _check_process_exists(pid: int) -> bool:
 
 
 # ============================================================
+#  进程队列管理
+# ============================================================
+
+# 全局进程队列：跟踪所有启动的agent扫描进程
+# 格式: deque([{"name": str, "type": str, "pid": int, "started_at": datetime}, ...])
+_active_processes: deque = deque(maxlen=100)  # 最多保留100条记录
+
+
+def _register_process(agent_name: str, agent_type: str, pid: int):
+    """注册一个启动的agent扫描进程"""
+    from datetime import datetime
+    _active_processes.append({
+        "name": agent_name,
+        "type": agent_type,
+        "pid": pid,
+        "started_at": datetime.now(),
+    })
+
+
+def _get_active_processes() -> list[dict]:
+    """获取所有活跃的进程（检查进程是否真的存在）"""
+    active = []
+    for proc_info in _active_processes:
+        pid = proc_info.get("pid")
+        if pid and _check_process_exists(pid):
+            active.append(proc_info)
+    return active
+
+
+def _remove_process(agent_name: str | None = None, pid: int | None = None):
+    """从队列中移除进程（通过name或pid）"""
+    # deque不支持切片赋值，需要重建deque
+    from collections import deque
+    if agent_name:
+        filtered = [p for p in _active_processes if p.get("name") != agent_name]
+        _active_processes.clear()
+        _active_processes.extend(filtered)
+    elif pid:
+        filtered = [p for p in _active_processes if p.get("pid") != pid]
+        _active_processes.clear()
+        _active_processes.extend(filtered)
+
+
+# ============================================================
+#  Agent Scanner 启动
+# ============================================================
+
+def _auto_start_agents(silent: bool = True) -> int:
+    """
+    自动启动所有已注册但未运行的agent扫描器
+    同时同步agents.json中的进程到全局队列
+    
+    Args:
+        silent: 是否静默启动（不打印输出）
+    
+    Returns:
+        int: 成功启动的agent数量
+    """
+    from secretary.agents import list_workers, update_worker_status
+    
+    workers = list_workers()
+    started_count = 0
+    
+    # 先同步agents.json中的进程到队列（确保队列完整）
+    _sync_processes_to_queue()
+    
+    for worker in workers:
+        agent_name = worker.get("name")
+        agent_type = worker.get("type", "worker")
+        pid = worker.get("pid")
+        
+        # 检查是否已经在运行
+        is_running = False
+        if pid:
+            if _check_process_exists(pid):
+                is_running = True
+                # 确保在队列中（可能队列丢失了）
+                _ensure_process_in_queue(agent_name, agent_type, pid)
+            else:
+                # 进程不存在，清除pid记录
+                update_worker_status(agent_name, "idle", pid=None)
+                _remove_process(agent_name=agent_name)
+        
+        # 如果未运行，启动scanner
+        if not is_running:
+            try:
+                if _start_agent_scanner(agent_name, agent_type, silent=silent):
+                    started_count += 1
+            except Exception as e:
+                # 启动失败时记录错误，但不中断其他agent的启动
+                if not silent:
+                    print(f"⚠️  启动 {agent_name} ({agent_type}) 失败: {e}")
+                # 在静默模式下，错误会被忽略，但可以通过日志查看
+    
+    return started_count
+
+
+def _sync_processes_to_queue():
+    """同步agents.json中的进程到全局队列（确保队列完整）"""
+    from secretary.agents import list_workers
+    workers = list_workers()
+    
+    for worker in workers:
+        agent_name = worker.get("name")
+        agent_type = worker.get("type", "worker")
+        pid = worker.get("pid")
+        status = worker.get("status", "idle")
+        
+        # 如果状态是busy且有PID，确保在队列中
+        if pid and status == "busy":
+            if _check_process_exists(pid):
+                _ensure_process_in_queue(agent_name, agent_type, pid)
+
+
+def _ensure_process_in_queue(agent_name: str, agent_type: str, pid: int):
+    """确保进程在队列中（如果不在则添加）"""
+    # 检查是否已在队列中
+    for proc_info in _active_processes:
+        if proc_info.get("name") == agent_name and proc_info.get("pid") == pid:
+            return  # 已在队列中
+    
+    # 不在队列中，添加
+    _register_process(agent_name, agent_type, pid)
+
+
+def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False) -> bool:
+    """
+    根据agent类型启动对应的scanner进程
+    
+    Args:
+        agent_name: agent名称
+        agent_type: agent类型 (secretary/worker/boss/recycler)
+        silent: 是否静默启动（不打印输出）
+    
+    Returns:
+        bool: 是否成功启动
+    """
+    import secretary.config as cfg
+    import subprocess
+    import os
+    from secretary.agents import update_worker_status, _worker_logs_dir
+    
+    try:
+        # 根据类型构建启动命令和配置
+        if agent_type == "secretary":
+            # Secretary 使用 secretary.kai_scanner，统一使用 agents/<name>/logs/scanner.log
+            from secretary.agents import _worker_logs_dir
+            log_dir = _worker_logs_dir(agent_name)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            scanner_log_file = log_dir / "scanner.log"
+            # 传递 secretary_name 参数（通过环境变量）
+            sub_cmd = [sys.executable, "-m", "secretary.kai_scanner", "--verbose"]
+            env["SECRETARY_NAME"] = agent_name
+            
+        elif agent_type == "worker":
+            # Worker 使用 secretary.scanner --worker <name>
+            log_dir = _worker_logs_dir(agent_name)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            scanner_log_file = log_dir / "scanner.log"
+            sub_cmd = [sys.executable, "-m", "secretary.scanner", "--worker", agent_name, "--quiet"]
+            
+        elif agent_type == "boss":
+            # Boss 使用 secretary.scanner --boss <name>
+            log_dir = _worker_logs_dir(agent_name)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            scanner_log_file = log_dir / "scanner.log"
+            sub_cmd = [sys.executable, "-m", "secretary.scanner", "--boss", agent_name, "--quiet"]
+            
+        elif agent_type == "recycler":
+            # Recycler 使用 secretary.recycler，需要特殊环境变量
+            log_dir = _worker_logs_dir(agent_name)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            scanner_log_file = log_dir / "scanner.log"
+            sub_cmd = [sys.executable, "-m", "secretary.recycler"]
+            # Recycler 输出到 null，不保留日志
+            
+        else:
+            if not silent:
+                print(f"⚠️  未知的agent类型: {agent_type}，跳过启动 {agent_name}")
+            return False
+        
+        # 设置环境变量
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
+        
+        # 所有类型都重定向输出到日志文件
+        if agent_type == "recycler":
+            env["KAI_RECYCLE_BACKGROUND"] = "1"
+        
+        # 打开日志文件用于重定向输出
+        log_file_handle = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
+        
+        proc = subprocess.Popen(
+            sub_cmd,
+            stdout=log_file_handle,
+            stderr=subprocess.STDOUT,
+            cwd=cfg.BASE_DIR,
+            env=env,
+            bufsize=1,
+        )
+        
+        # 不关闭文件句柄，让进程持续写入
+        
+        # 更新状态和注册进程
+        update_worker_status(agent_name, "busy", pid=proc.pid)
+        _register_process(agent_name, agent_type, proc.pid)
+        
+        if not silent:
+            type_icons = {
+                "secretary": "🤖",
+                "worker": "👷",
+                "boss": "👔",
+                "recycler": "♻️",
+            }
+            icon = type_icons.get(agent_type, "❓")
+            print(f"✅ {icon} {agent_name} ({agent_type}) 已在后台启动 (PID={proc.pid})")
+            if agent_type != "recycler":
+                print(f"   日志: {scanner_log_file}")
+        
+        return True
+        
+    except Exception as e:
+        if not silent:
+            print(f"❌ 启动 {agent_name} ({agent_type}) 失败: {e}")
+        return False
+
+
+# ============================================================
 #  任务提交
 # ============================================================
 
-def _write_kai_task(request: str, min_time: int = 0) -> Path:
-    """公用：将任务写入 kai 的 tasks 目录，由 kai 扫描器处理（run_secretary）。
+def _write_kai_task(request: str, min_time: int = 0, secretary_name: str = "kai") -> Path:
+    """公用：将任务写入指定secretary的 tasks 目录，由secretary扫描器处理（run_secretary）。
     与 task 命令不指定 --worker 时行为一致。返回写入的文件路径。
     """
-    cfg.KAI_TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    from secretary.agents import _worker_tasks_dir
+    tasks_dir = _worker_tasks_dir(secretary_name)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
     task_file_name = f"task-{timestamp}.md"
-    task_file = cfg.KAI_TASKS_DIR / task_file_name
+    task_file = tasks_dir / task_file_name
     task_content = request
     if min_time > 0:
         task_content += f"\n\n<!-- min_time: {min_time} -->\n"
     task_file.write_text(task_content, encoding="utf-8")
     return task_file
+
+
+def _select_secretary(secretaries: list[dict]) -> str | None:
+    """在TUI中让用户选择secretary，返回选中的secretary名称"""
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.prompt import Prompt
+        from rich.table import Table
+        
+        console = Console()
+        
+        # 构建选择表格
+        table = Table(title="选择Secretary Agent", show_header=True, header_style="bold magenta")
+        table.add_column("序号", style="cyan", width=6)
+        table.add_column("名称", style="green", width=20)
+        table.add_column("描述", style="yellow", width=40)
+        table.add_column("状态", style="blue", width=10)
+        
+        for idx, sec in enumerate(secretaries, 1):
+            name = sec.get("name", "unknown")
+            desc = sec.get("description", "(无描述)")
+            status = sec.get("status", "unknown")
+            table.add_row(str(idx), name, desc[:40], status)
+        
+        console.print("\n")
+        console.print(table)
+        console.print("\n")
+        
+        # 提示用户选择
+        while True:
+            choice = Prompt.ask(
+                f"请选择secretary (1-{len(secretaries)})",
+                default="1",
+                console=console
+            )
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(secretaries):
+                    return secretaries[idx]["name"]
+                else:
+                    console.print(f"[red]❌ 无效选择，请输入 1-{len(secretaries)}[/]")
+            except ValueError:
+                console.print(f"[red]❌ 请输入数字 1-{len(secretaries)}[/]")
+    except ImportError:
+        # 如果没有rich库，使用简单的文本选择
+        print("\n请选择secretary:")
+        for idx, sec in enumerate(secretaries, 1):
+            name = sec.get("name", "unknown")
+            desc = sec.get("description", "(无描述)")
+            print(f"  {idx}. {name} - {desc}")
+        
+        while True:
+            try:
+                choice = input(f"\n请输入序号 (1-{len(secretaries)}): ").strip()
+                idx = int(choice) - 1
+                if 0 <= idx < len(secretaries):
+                    return secretaries[idx]["name"]
+                else:
+                    print(f"❌ 无效选择，请输入 1-{len(secretaries)}")
+            except ValueError:
+                print(f"❌ 请输入数字 1-{len(secretaries)}")
+            except (EOFError, KeyboardInterrupt):
+                return None
 
 
 def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None):
@@ -99,17 +393,23 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
         print("❌ 请提供任务描述")
         sys.exit(1)
 
-    # 如果指定了 worker，直接写入该 worker 的 tasks 目录；否则交给下面写 kai tasks
+    # 如果指定了 worker，直接写入该 worker 的 tasks 目录；否则交给下面写 secretary tasks
     if worker_name:
         from secretary.agents import get_worker, register_worker, _worker_tasks_dir
         import secretary.config as cfg
         
         # 确保 worker 存在
         worker = get_worker(worker_name)
+        worker_created = False
         if not worker:
             print(f"ℹ️  Worker '{worker_name}' 不存在，自动创建...")
             register_worker(worker_name, description=f"由任务分配创建")
             worker = get_worker(worker_name)
+            worker_created = True
+        
+        # 如果worker是新创建的，自动启动它的扫描器
+        if worker_created:
+            _start_agent_scanner(worker_name, "worker", silent=False)
         
         # 生成任务文件名
         from datetime import datetime
@@ -148,8 +448,15 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
         return
 
     # 否则，通过秘书 Agent 提交（后台执行，输出到 secretary.log）
-    from secretary.agents import list_workers, _worker_tasks_dir
+    from secretary.agents import list_workers, _worker_tasks_dir, get_worker
     import subprocess
+    
+    # 检查是否有 secretary，如果没有则提示（不再检查 kai，因为可能使用其他 secretary）
+    secretaries = [w for w in list_workers() if w.get("type") == "secretary"]
+    if not secretaries:
+        print(f"⚠️  没有可用的secretary agent，无法提交任务")
+        print(f"   请先使用 `{_cli_name()} task` 命令（会自动创建secretary）或使用 `{_cli_name()} hire <name> secretary`")
+        return
     
     # 收集所有 worker 的任务文件（用于检测新任务）
     before = {}
@@ -159,15 +466,21 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
             for f in wtd.glob("*.md"):
                 before[f"{w['name']}/{f.name}"] = f.stat().st_mtime
     
+    # 使用第一个 secretary（或让用户选择，但这里简化处理）
+    secretary_name = secretaries[0]["name"]
+    
     print(f"\n📨 提交任务: {request}")
     if min_time > 0:
         print(f"   ⏱️ 最低执行时间: {min_time}s")
-    print(f"   ⏳ 后台执行中，输出写入 {cfg.KAI_SECRETARY_LOG}")
-    print(f"   使用 `{_cli_name()} check kai` 查看日志\n")
-
-    # 后台执行，输出写到 kai 日志目录
-    cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    secretary_log_file = cfg.KAI_SECRETARY_LOG
+    
+    # 使用 secretary 的日志目录（不再使用固定的 kai 日志目录）
+    from secretary.agents import _worker_logs_dir
+    log_dir = _worker_logs_dir(secretary_name)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    secretary_log_file = log_dir / "secretary.log"
+    
+    print(f"   ⏳ 后台执行中，输出写入 {secretary_log_file}")
+    print(f"   使用 `{_cli_name()} check {secretary_name}` 查看日志\n")
     
     # 构建命令（使用 shlex 正确处理带引号的任务描述）
     import shlex
@@ -210,188 +523,141 @@ def cmd_task(args):
     if worker_name:
         _submit_task(request, min_time=args.time, worker_name=worker_name)
     else:
-        # 复用：将任务写入 kai 的 tasks/ 目录，由 kai 的扫描器处理
-        task_file = _write_kai_task(request, min_time=args.time)
-        print(f"\n📨 任务已提交到 kai")
-        print(f"   ✅ 任务文件: {task_file}")
-        if args.time > 0:
-            print(f"   ⏱️ 最低执行时间: {args.time}s")
-        print(f"   💡 使用 `{_cli_name()} check kai` 查看 kai 的处理日志")
-        print(f"   💡 确保 kai 的扫描器正在运行（`{_cli_name()} start kai`）")
+        # 检查是否有secretary和worker类型的agent
+        from secretary.agents import list_workers, register_agent, get_worker, pick_available_name
+        all_workers = list_workers()
+        secretaries = [w for w in all_workers if w.get("type") == "secretary"]
+        workers = [w for w in all_workers if w.get("type") == "worker"]
+        
+        # 如果没有secretary，自动创建一个（优先使用yks，如果被占用则选择其他可用名字）
+        if len(secretaries) == 0:
+            secretary_name = pick_available_name(preferred_names=["yks", "ykx", "yky", "aks", "akx"])
+            if not get_worker(secretary_name):
+                register_agent(secretary_name, agent_type="secretary", description="默认秘书Agent")
+                print(f"   ✅ 已自动创建secretary: {secretary_name}")
+                _start_agent_scanner(secretary_name, "secretary", silent=True)
+            secretaries = [{"name": secretary_name, "type": "secretary"}]
+        
+        # 如果没有worker，自动创建一个（优先使用ykc，如果被占用则选择其他可用名字）
+        if len(workers) == 0:
+            worker_name = pick_available_name(preferred_names=["ykc", "ykz", "aky", "akz", "akc"])
+            if not get_worker(worker_name):
+                register_agent(worker_name, agent_type="worker", description="默认通用工人")
+                print(f"   ✅ 已自动创建worker: {worker_name}")
+                _start_agent_scanner(worker_name, "worker", silent=True)
+        
+        # 重新获取secretaries列表（可能刚创建了yks）
+        secretaries = [w for w in list_workers() if w.get("type") == "secretary"]
+        
+        if len(secretaries) == 1:
+            # 只有一个secretary，直接使用
+            secretary_name = secretaries[0]["name"]
+            task_file = _write_kai_task(request, min_time=args.time, secretary_name=secretary_name)
+            print(f"\n📨 任务已提交到 {secretary_name}")
+            print(f"   ✅ 任务文件: {task_file}")
+            if args.time > 0:
+                print(f"   ⏱️ 最低执行时间: {args.time}s")
+            print(f"   💡 使用 `{_cli_name()} check {secretary_name}` 查看处理日志")
+        else:
+            # 多个secretary，显示TUI让用户选择
+            secretary_name = _select_secretary(secretaries)
+            if not secretary_name:
+                print("❌ 未选择secretary，任务提交已取消")
+                return
+            task_file = _write_kai_task(request, min_time=args.time, secretary_name=secretary_name)
+            print(f"\n📨 任务已提交到 {secretary_name}")
+            print(f"   ✅ 任务文件: {task_file}")
+            if args.time > 0:
+                print(f"   ⏱️ 最低执行时间: {args.time}s")
+            print(f"   💡 使用 `{_cli_name()} check {secretary_name}` 查看处理日志")
 
 
-def _run_keep_monitor(goal: str, worker_name: str):
-    """内部函数：执行 keep 监控循环（使用 agent_loop.run_loop，触发条件为 tasks+ongoing 均空）。"""
-    import json
-    from secretary.agents import get_worker, register_worker, _worker_tasks_dir, _worker_ongoing_dir
-    from secretary.agent_loop import run_loop
-    import secretary.config as cfg
-
-    # 确保 worker 存在并启动
-    worker = get_worker(worker_name)
-    if not worker:
-        print(f"ℹ️  Worker '{worker_name}' 不存在，自动创建并启动...")
-        register_worker(worker_name, description=f"持续监控模式: {goal[:50]}")
-        worker = get_worker(worker_name)
-        print(f"🚀 自动启动 worker '{worker_name}'...")
-        class StartArgs:
-            def __init__(self):
-                self.worker_names = [worker_name]
-                self.once = False
-        cmd_start(StartArgs())
-    if worker.get("pid") and not _check_process_exists(worker["pid"]):
-        print(f"⚠️  Worker '{worker_name}' 的进程不存在，重新启动...")
-        class StartArgs:
-            def __init__(self):
-                self.worker_names = [worker_name]
-                self.once = False
-        cmd_start(StartArgs())
-    elif not worker.get("pid"):
-        print(f"⚠️  Worker '{worker_name}' 未运行，启动中...")
-        class StartArgs:
-            def __init__(self):
-                self.worker_names = [worker_name]
-                self.once = False
-        cmd_start(StartArgs())
-
-    goal_file = cfg.WORKERS_DIR / worker_name / "keep-goal.md"
-    goal_file.parent.mkdir(parents=True, exist_ok=True)
-    goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
-
-    scan_interval = 10
-    print(f"\n📊 开始监控循环（每 {scan_interval} 秒检查一次）...")
-    print(f"   按 Ctrl+C 退出\n")
-
-    def _build_keep_request():
-        completed_tasks_info = []
-        if cfg.STATS_DIR.exists():
-            for report_file in sorted(cfg.STATS_DIR.glob("*-stats.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-                try:
-                    stats_data = json.loads(report_file.read_text(encoding="utf-8"))
-                    task_name = report_file.stem.replace("-stats", "")
-                    summary = stats_data.get("summary", "") if isinstance(stats_data, dict) else ""
-                    completed_tasks_info.append({"name": task_name, "summary": summary})
-                except Exception:
-                    pass
-        if not completed_tasks_info and cfg.REPORT_DIR.exists():
-            for report_file in sorted(cfg.REPORT_DIR.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
-                try:
-                    content = report_file.read_text(encoding="utf-8")
-                    lines = content.splitlines()
-                    title = ""
-                    for line in lines[:10]:
-                        if line.strip().startswith("#"):
-                            title = line.strip().lstrip("#").strip()
-                            break
-                    if not title:
-                        title = report_file.stem.replace("-report", "")
-                    completed_tasks_info.append({"name": title, "summary": content[:300] if len(content) > 300 else content})
-                except Exception:
-                    pass
-        completed_summary = ""
-        if completed_tasks_info:
-            completed_summary = "\n已完成的任务：\n"
-            for i, task_info in enumerate(completed_tasks_info, 1):
-                completed_summary += f"{i}. {task_info['name']}"
-                if task_info.get('summary'):
-                    s = task_info['summary']
-                    completed_summary += f" - {s[:150] + '...' if len(s) > 150 else s}"
-                completed_summary += "\n"
-        return f"""【持续监控模式】当前任务队列为空，请基于以下信息决定下一步应该做什么：
-
-持续目标：{goal}
-{completed_summary}
-
-请分析持续目标和已完成的工作，决定下一步应该做什么来推进目标，并生成一个具体的、可执行的任务分配给 worker '{worker_name}'。"""
-
-    def trigger_fn():
-        tasks_dir = _worker_tasks_dir(worker_name)
-        ongoing_dir = _worker_ongoing_dir(worker_name)
-        tasks = list(tasks_dir.glob("*.md")) if tasks_dir.exists() else []
-        ongoing = list(ongoing_dir.glob("*.md")) if ongoing_dir.exists() else []
-        if len(tasks) == 0 and len(ongoing) == 0:
-            return [None]  # 一项占位，表示需要生成任务
-        return []
-
-    def process_fn(_item):
-        print(f"\n📝 [{datetime.now().strftime('%H:%M:%S')}] 检测到任务队列为空，让秘书决定新任务...")
-        request = _build_keep_request()
-        _write_kai_task(request)
-        print(f"   ✅ 已提交到 kai 任务队列，由秘书处理（需运行 `{_cli_name()} start kai`）")
-
-    def on_idle():
-        tasks_dir = _worker_tasks_dir(worker_name)
-        ongoing_dir = _worker_ongoing_dir(worker_name)
-        tasks = list(tasks_dir.glob("*.md")) if tasks_dir.exists() else []
-        ongoing = list(ongoing_dir.glob("*.md")) if ongoing_dir.exists() else []
-        status = f"待处理: {len(tasks)}, 执行中: {len(ongoing)}"
-        print(f"   [{datetime.now().strftime('%H:%M:%S')}] {status}", end="\r")
-
-    run_loop(
-        trigger_fn=trigger_fn,
-        process_fn=process_fn,
-        interval_sec=scan_interval,
-        once=False,
-        label="keep",
-        verbose=True,
-        on_idle=on_idle,
-    )
-    print(f"\n\n👋 退出持续监控模式")
-    print(f"   持续目标已保存: {goal_file}")
-
-
-def cmd_keep(args):
-    """持续监控模式：为指定 worker 持续生成任务以推进目标 - 后台执行"""
+def cmd_boss(args):
+    """创建并启动Boss Agent：监控指定worker，在队列为空时生成新任务"""
     import secretary.config as cfg
     import subprocess
+    import os
     
+    # 解析参数：boss <boss-name> "任务" <worker-name>
+    # args.boss_name, args.goal (列表), args.worker_name
+    boss_name = args.boss_name
     goal = " ".join(args.goal) if isinstance(args.goal, list) else args.goal
-    worker_name = args.worker or cfg.DEFAULT_WORKER_NAME
+    worker_name = args.worker_name or cfg.DEFAULT_WORKER_NAME
     
-    # 检查是否在后台模式（通过环境变量）
-    if os.environ.get("KAI_KEEP_BACKGROUND") == "1":
-        # 已经在后台，直接执行监控循环
-        _run_keep_monitor(goal, worker_name)
+    # 检查boss_name是否已被使用（且不是boss类型）
+    from secretary.agents import register_agent, get_worker
+    existing_boss = get_worker(boss_name)
+    if existing_boss and existing_boss.get("type") != "boss":
+        print(f"⚠️  名字 '{boss_name}' 已被注册为 {existing_boss.get('type')} 类型，不能用作boss")
+        print(f"   请使用其他名字或先解雇该agent")
         return
     
-    # 后台执行，输出写到 kai 日志目录（keep 由 kai 驱动，与 worker 的 scanner.log 分开）
-    cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    keep_log_file = cfg.KAI_KEEP_LOG
+    # 确保worker存在（如果不存在则创建）
+    # 检查是否试图将 secretary 类型的 agent 作为 worker
+    from secretary.agents import get_worker
+    existing_agent = get_worker(worker_name)
+    if existing_agent and existing_agent.get("type") == "secretary":
+        print(f"⚠️  '{worker_name}' 是 secretary 类型，不能作为 worker，请使用其他名称")
+        return
     
-    print(f"\n🔄 启动持续监控模式（后台执行）")
-    print(f"   目标: {goal}")
-    print(f"   Worker: {worker_name}")
-    print(f"   日志: {keep_log_file}")
-    print(f"   使用 `{_cli_name()} check kai` 查看 kai 相关日志（scanner/keep 等）\n")
+    # 检查worker_name是否已被使用（且不是worker类型）
+    existing_worker = get_worker(worker_name)
+    if existing_worker and existing_worker.get("type") != "worker":
+        print(f"⚠️  名字 '{worker_name}' 已被注册为 {existing_worker.get('type')} 类型，不能用作worker")
+        print(f"   请使用其他名字或先解雇该agent")
+        return
     
-    # 构建命令
-    sub_cmd = [sys.executable, "-m", "secretary.cli", "keep"] + args.goal
-    if args.worker:
-        sub_cmd.extend(["--worker", args.worker])
+    worker_created = False
+    if not existing_worker:
+        register_agent(worker_name, agent_type="worker", description=f"由Boss {boss_name}监控的Worker")
+        print(f"✅ 已创建worker: {worker_name}")
+        worker_created = True
     
-    # 设置环境变量
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["KAI_KEEP_BACKGROUND"] = "1"  # 标记为后台模式
+    # 如果worker是新创建的，自动启动它的扫描器
+    if worker_created:
+        _start_agent_scanner(worker_name, "worker", silent=False)
     
-    # 后台执行
-    fh = open(keep_log_file, "a", encoding="utf-8")
-    fh.write(f"# Keep mode started: {goal[:100]}\n")
-    fh.write(f"# Worker: {worker_name}\n")
-    fh.write(f"# Started: {datetime.now().isoformat()}\n\n")
-    fh.flush()
+    # 创建boss目录和配置
+    boss_dir = cfg.AGENTS_DIR / boss_name
+    boss_dir.mkdir(parents=True, exist_ok=True)
     
-    proc = subprocess.Popen(
-        sub_cmd,
-        stdout=fh,
-        stderr=subprocess.STDOUT,
-        cwd=str(cfg.BASE_DIR),
-        env=env,
+    # 创建必要的子目录
+    (boss_dir / "tasks").mkdir(parents=True, exist_ok=True)
+    (boss_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (boss_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (boss_dir / "stats").mkdir(parents=True, exist_ok=True)
+    
+    # 写入目标文件
+    goal_file = boss_dir / "goal.md"
+    goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
+    
+    # 写入配置文件
+    config_file = boss_dir / "config.md"
+    config_file.write_text(
+        f"# Boss配置\n\n"
+        f"监控的Worker: {worker_name}\n"
+        f"持续目标: {goal[:100]}...\n",
+        encoding="utf-8"
     )
-    fh.close()
     
-    print(f"✅ 持续监控模式已在后台启动 (PID={proc.pid})")
-    print(f"   使用 `{_cli_name()} check kai` 查看输出（keep 日志: {cfg.KAI_KEEP_LOG.name}）")
+    # 注册boss agent（检查是否已被其他类型占用）
+    existing_boss_check = get_worker(boss_name)
+    if existing_boss_check and existing_boss_check.get("type") != "boss":
+        print(f"⚠️  名字 '{boss_name}' 已被注册为 {existing_boss_check.get('type')} 类型，不能用作boss")
+        print(f"   请使用其他名字或先解雇该agent")
+        return
+    if not existing_boss_check:
+        register_agent(boss_name, agent_type="boss", description=f"Boss: {goal[:50]}")
+    
+    # Boss不需要初始任务文件，因为它通过检查worker队列来触发
+    # 使用统一的启动函数启动boss扫描器
+    _start_agent_scanner(boss_name, "boss", silent=False)
+    
+    print(f"✅ Boss '{boss_name}' 已创建并启动")
+    print(f"   持续目标: {goal}")
+    print(f"   监控Worker: {worker_name}")
+
+
 
 
 # ============================================================
@@ -488,124 +754,109 @@ def cmd_skills(args):
 # ============================================================
 
 def cmd_hire(args):
-    """招募工作者 (只注册，不启动扫描)，支持多个名字"""
-    from secretary.agents import pick_random_name, register_worker, get_worker
+    """招募并启动agent：hire <name> <type>，type 可以是 secretary / worker / recycler"""
+    from secretary.agents import pick_random_name, register_agent, get_worker
     import secretary.config as cfg
 
-    names = getattr(args, "worker_names", None) or []
-    if not names:
-        names = [pick_random_name()]
-        print(f"🎲 随机招募: {names[0]}")
-    description = args.description if hasattr(args, "description") else ""
+    # 解析参数：hire <name> [type] 或 hire <name> <type> --description "描述"
+    # worker_names 来自解析器：不填则 []，hire alice -> [alice]，hire alice worker -> [alice, worker]
+    worker_names = getattr(args, "worker_names", None)
+    # 确保 worker_names 是列表
+    if worker_names is None:
+        names = []
+    elif isinstance(worker_names, list):
+        names = worker_names
+    else:
+        # 如果不是列表，尝试转换为列表
+        names = [worker_names] if worker_names else []
+    
+    # 支持的类型关键词
+    valid_types = ("secretary", "worker", "recycler")
+    
+    # 识别参数中的类型关键词和名称
+    agent_type = "worker"  # 默认类型
+    agent_name = None
+    
+    for arg in names:
+        arg_lower = arg.lower()
+        if arg_lower in valid_types:
+            # 如果参数是类型关键词，设置为类型
+            agent_type = arg_lower
+        else:
+            # 如果参数不是类型关键词，作为名称（只取第一个非类型参数作为名称）
+            if agent_name is None:
+                agent_name = arg
+    
+    # 如果没有找到名称，随机生成一个
+    if agent_name is None:
+        agent_name = pick_random_name()
+    
+    description = getattr(args, "description", None) or ""
 
-    for worker_name in names:
-        existing = get_worker(worker_name)
-        if existing:
-            print(f"ℹ️  Worker '{worker_name}' 已存在")
-            print(f"   使用 `{_cli_name()} start {worker_name}` 启动扫描")
-            continue
-        register_worker(worker_name, description=description)
-        print(f"✅ 已招募 worker: {worker_name}")
-        print(f"   使用 `{_cli_name()} start {worker_name}` 启动扫描")
+    # 检查是否已存在
+    existing = get_worker(agent_name)
+    if existing:
+        print(f"ℹ️  Agent '{agent_name}' 已存在")
+        print(f"   类型: {existing.get('type', 'unknown')}")
+        return
+
+    # 注册agent
+    register_agent(agent_name, agent_type=agent_type, description=description)
+    print(f"✅ 已注册 {agent_type} agent: {agent_name}")
+
+    # 统一通过 _start_agent_scanner 启动（secretary / worker / recycler）
+    _start_agent_scanner(agent_name, agent_type, silent=False)
 
 
-def cmd_start(args):
-    """启动 worker 的扫描器 (开始处理任务) - 后台执行，支持多个名字"""
-    from secretary.agents import get_worker, _worker_logs_dir, update_worker_status
-    import secretary.config as cfg
-    import subprocess
-    import os
-
-    names = getattr(args, "worker_names", None) or []
-    if not names:
-        names = [cfg.DEFAULT_WORKER_NAME]
-
-    for worker_name in names:
-        # 特殊处理：如果 worker_name 是 "kai"，启动 kai 的扫描器
-        if worker_name.lower() == "kai":
-            cfg.KAI_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-            scanner_log_file = cfg.KAI_SCANNER_LOG
-
-            sub_cmd = [sys.executable, "-m", "secretary.kai_scanner"]
-            if args.once:
-                sub_cmd.append("--once")
-            sub_cmd.append("--verbose")
-
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["PYTHONUNBUFFERED"] = "1"
-            fh = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
-            proc = subprocess.Popen(
-                sub_cmd,
-                stdout=fh,
-                stderr=subprocess.STDOUT,
-                cwd=cfg.BASE_DIR,
-                env=env,
-                bufsize=1,
-            )
-            print(f"✅ Kai 的扫描器已在后台启动 (PID={proc.pid})")
-            print(f"   日志: {scanner_log_file}")
-            print(f"   使用 `{_cli_name()} check kai` 查看输出")
-            print(f"   使用 `{_cli_name()} stop kai` 停止")
-            continue
-
-        worker = get_worker(worker_name)
-        if not worker:
-            print(f"❌ Worker '{worker_name}' 不存在")
-            print(f"   使用 `{_cli_name()} hire {worker_name}` 先招募 worker")
-            continue
-
-        if worker.get("pid") and _check_process_exists(worker["pid"]):
-            print(f"ℹ️  Worker '{worker_name}' 已在运行 (PID={worker['pid']})")
-            continue
-
-        log_dir = _worker_logs_dir(worker_name)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        scanner_log_file = log_dir / "scanner.log"
-
-        sub_cmd = [sys.executable, "-m", "secretary.scanner", "--worker", worker_name]
-        if args.once:
-            sub_cmd.append("--once")
-        sub_cmd.append("--quiet")
-
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUNBUFFERED"] = "1"
-        fh = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
-        proc = subprocess.Popen(
-            sub_cmd,
-            stdout=fh,
-            stderr=subprocess.STDOUT,
-            cwd=cfg.BASE_DIR,
-            env=env,
-            bufsize=1,
-        )
-        update_worker_status(worker_name, "busy", pid=proc.pid)
-        print(f"✅ Worker '{worker_name}' 已在后台启动 (PID={proc.pid})")
-        print(f"   日志: {scanner_log_file}")
-        print(f"   使用 `{_cli_name()} check {worker_name}` 查看输出")
-        print(f"   使用 `{_cli_name()} stop {worker_name}` 停止")
 
 
 def cmd_fire(args):
-    """解雇 (删除) 一个或多个命名工人"""
-    from secretary.agents import get_worker, remove_worker
+    """解雇 (删除) 一个或多个命名工人，或使用 'all' 解雇所有agent"""
+    from secretary.agents import get_worker, remove_worker, list_workers, update_worker_status
 
-    for worker_name in args.worker_names:
+    # 检查是否是 "all"
+    worker_names = args.worker_names
+    if len(worker_names) == 1 and worker_names[0].lower() == "all":
+        # 解雇所有agent
+        all_workers = list_workers()
+        if not all_workers:
+            print("ℹ️  没有已注册的agent")
+            return
+        
+        print(f"⚠️  即将解雇所有 {len(all_workers)} 个agent")
+        # 确认（可选，或者直接执行）
+        worker_names = [w["name"] for w in all_workers]
+    else:
+        worker_names = args.worker_names
+
+    for worker_name in worker_names:
         info = get_worker(worker_name)
         if not info:
-            print(f"❌ 没有叫 {worker_name} 的工人")
-            print(f"   用 `{_cli_name()} workers` 查看所有工人")
+            print(f"❌ 没有叫 {worker_name} 的agent")
+            print(f"   用 `{_cli_name()} workers` 查看所有agent")
             continue
 
         if info.get("ongoing_count", 0) > 0:
             print(f"⚠️  {worker_name} 还有 {info['ongoing_count']} 个任务在执行中!")
-            print(f"   建议先停止其进程再解雇")
+            print(f"   将强制停止进程并解雇")
 
+        # 1. 先停止进程（如果存在）
+        pid = info.get("pid")
+        if pid and _check_process_exists(pid):
+            print(f"   停止 {worker_name} 的进程 (PID={pid})...")
+            _stop_process(pid, worker_name, verbose=False)
+        
+        # 2. 从进程队列中移除
+        _remove_process(agent_name=worker_name)
+        
+        # 3. 更新 agents.json（虽然要删除，但先清理干净）
+        update_worker_status(worker_name, "idle", pid=None)
+        
+        # 4. 删除注册信息和目录
         success = remove_worker(worker_name)
         if success:
-            print(f"🔥 已解雇工人: {worker_name}")
-            print(f"   已删除 {worker_name}/ 目录及注册信息")
+            print(f"🔥 已解雇agent: {worker_name}")
+            print(f"   已停止进程、删除目录及注册信息")
         else:
             print(f"❌ 解雇失败: {worker_name}")
 
@@ -645,51 +896,39 @@ def cmd_workers(args):
 
 
 def cmd_recycle(args):
-    """启动回收者 - 后台执行，不保留日志"""
+    """启动回收者：复用 hire/start 体系。未注册则等价 hire recycler recycler，未运行则 _start_agent_scanner。"""
     from secretary.recycler import run_recycler
-    import subprocess
+    from secretary.agents import get_worker, register_agent
     import os
-    
-    # 检查是否在后台模式
+
+    recycler_name = "recycler"
+
+    # 已在后台子进程中，直接执行 recycler 主循环
     if os.environ.get("KAI_RECYCLE_BACKGROUND") == "1":
-        # 已经在后台，直接执行
         run_recycler(once=args.once, verbose=False)
         return
-    
-    # 后台执行，不保留日志（输出到 /dev/null 或 NUL）
-    print(f"\n♻️ 启动回收者（后台执行）")
+
+    # --once：前台执行一次后退出，不 spawn 后台进程
     if args.once:
-        print(f"   模式: 只执行一次")
-    else:
-        print(f"   模式: 持续运行")
-    print()
-    
-    # 构建命令
-    sub_cmd = [sys.executable, "-m", "secretary.recycler"]
-    if args.once:
-        sub_cmd.append("--once")
-    
-    # 设置环境变量
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["KAI_RECYCLE_BACKGROUND"] = "1"
-    
-    # 后台执行，不保留日志
-    if sys.platform == "win32":
-        null_file = open(os.devnull, "w")
-    else:
-        null_file = open(os.devnull, "w")
-    
-    proc = subprocess.Popen(
-        sub_cmd,
-        stdout=null_file,
-        stderr=subprocess.STDOUT,
-        cwd=str(cfg.BASE_DIR),
-        env=env,
-    )
-    null_file.close()
-    
-    print(f"✅ 回收者已在后台启动 (PID={proc.pid})")
+        print(f"\n♻️ 回收者（单次执行）\n")
+        run_recycler(once=True, verbose=True)
+        return
+
+    # 确保存在名为 recycler 的 agent（未注册则等价 hire recycler recycler）
+    existing = get_worker(recycler_name)
+    if not existing:
+        register_agent(recycler_name, agent_type="recycler", description="回收者：审查报告")
+        print(f"✅ 已注册 recycler agent: {recycler_name}")
+
+    # 若已在运行则不再启动
+    pid = existing.get("pid") if existing else None
+    if pid and _check_process_exists(pid):
+        print(f"ℹ️  回收者已在运行 (PID={pid})")
+        return
+
+    # 未运行则启动（与 start 逻辑一致）
+    print(f"\n♻️ 启动回收者（后台执行）\n")
+    _start_agent_scanner(recycler_name, "recycler", silent=False)
 
 
 def cmd_monitor(args):
@@ -719,236 +958,162 @@ def cmd_monitor(args):
 #  控制命令
 # ============================================================
 
-def cmd_stop(args):
-    """停止指定 worker 或 kai 的进程，支持多个名字"""
-    from secretary.agents import get_worker, update_worker_status
-    import secretary.config as cfg
-
-    for worker_name in args.worker_names:
-        # 特殊处理：停止 kai
-        if worker_name.lower() == "kai":
-            pid = None
-            try:
-                if sys.platform == "win32":
-                    result = subprocess.run(
-                        ["wmic", "process", "where", "commandline like '%kai_scanner%'", "get", "processid"],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                    if result.returncode == 0:
-                        output = result.stdout.decode("gbk", errors="ignore")
-                        for line in output.splitlines():
-                            line = line.strip()
-                            if line and line.isdigit():
-                                pid = int(line)
-                                break
-                else:
-                    result = subprocess.run(
-                        ["ps", "aux"],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                    if result.returncode == 0:
-                        output = result.stdout.decode("utf-8", errors="ignore")
-                        for line in output.splitlines():
-                            if "kai_scanner" in line:
-                                parts = line.split()
-                                if len(parts) > 1:
-                                    try:
-                                        pid = int(parts[1])
-                                        break
-                                    except ValueError:
-                                        continue
-            except Exception as e:
-                print(f"   ⚠️  查找 kai 进程时出错: {e}")
-
-            if not pid:
-                print(f"ℹ️  Kai 的扫描器没有运行中的进程")
-            else:
-                print(f"\n🛑 停止 kai 的扫描器 (PID={pid})...")
-                _stop_process(pid, "kai")
-            continue
-
-        worker = get_worker(worker_name)
-        if not worker:
-            print(f"❌ Worker '{worker_name}' 不存在")
-            print(f"   使用 `{_cli_name()} workers` 查看所有 worker")
-            continue
-
-        pid = worker.get("pid")
-        if not pid:
-            print(f"ℹ️  Worker '{worker_name}' 没有运行中的进程")
-            continue
-
-        print(f"\n🛑 停止 worker '{worker_name}' (PID={pid})...")
-        _stop_process(pid, worker_name)
-        update_worker_status(worker_name, "idle", pid=None)
-        print(f"   📝 已更新 worker '{worker_name}' 状态为 idle，PID 已清除")
 
 
-def _stop_process(pid: int, name: str):
-    """停止指定 PID 的进程"""
+def _stop_process(pid: int, name: str, verbose: bool = True):
+    """停止指定 PID 的进程（辅助函数，供fire使用）"""
+    import signal
     try:
         if sys.platform == "win32":
-            # Windows: 先检查进程是否存在
-            check_result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            # Windows: 使用 taskkill
+            result = subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
                 capture_output=True,
-                timeout=5,
+                timeout=10,
             )
-            
-            # 检查进程是否存在
-            process_exists = False
-            if check_result.returncode == 0 and check_result.stdout:
-                try:
-                    output = check_result.stdout.decode("gbk", errors="ignore")
-                    if str(pid) in output and "信息" not in output:
-                        process_exists = True
-                except:
-                    # 如果解码失败，尝试直接检查
-                    if str(pid).encode() in check_result.stdout:
-                        process_exists = True
-            
-            if not process_exists:
-                print(f"   ℹ️  进程 PID={pid} 已不存在")
+            if result.returncode == 0:
+                if verbose:
+                    print(f"   ✅ 进程 {pid} 已停止")
             else:
-                # 进程存在，强制杀死
-                result = subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=10,
-                )
-                
-                # 再次检查进程是否还存在
-                verify_result = subprocess.run(
+                # 检查进程是否还存在
+                check_result = subprocess.run(
                     ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                     capture_output=True,
                     timeout=5,
                 )
-                
-                still_exists = False
-                if verify_result.returncode == 0 and verify_result.stdout:
+                if check_result.returncode == 0 and check_result.stdout:
                     try:
-                        output = verify_result.stdout.decode("gbk", errors="ignore")
+                        output = check_result.stdout.decode("gbk", errors="ignore")
                         if str(pid) in output and "信息" not in output:
-                            still_exists = True
+                            if verbose:
+                                print(f"   ⚠️  无法停止进程 PID={pid}，进程仍在运行")
+                        else:
+                            if verbose:
+                                print(f"   ✅ 进程 {pid} 已停止")
                     except:
-                        if str(pid).encode() in verify_result.stdout:
-                            still_exists = True
-                
-                if not still_exists:
-                    print(f"   ✅ 已停止 {name} (PID={pid})")
+                        if str(pid).encode() in check_result.stdout:
+                            if verbose:
+                                print(f"   ⚠️  无法停止进程 PID={pid}，进程仍在运行")
+                        else:
+                            if verbose:
+                                print(f"   ✅ 进程 {pid} 已停止")
                 else:
-                    print(f"   ⚠️  无法停止进程 PID={pid}，进程仍在运行")
+                    if verbose:
+                        print(f"   ✅ 进程 {pid} 已停止")
         else:
             # Unix/Linux: 使用 kill
             try:
-                os.kill(pid, 15)  # SIGTERM
-                print(f"   ✅ 已发送停止信号给 {name} (PID={pid})")
+                os.kill(pid, signal.SIGTERM)
+                if verbose:
+                    print(f"   ✅ 已发送停止信号给 {name} (PID={pid})")
                 # 等待一下，如果还没停止就强制杀死
                 import time
                 time.sleep(1)
                 try:
                     os.kill(pid, 0)  # 检查进程是否还存在
-                    os.kill(pid, 9)  # SIGKILL
-                    print(f"   ✅ 已强制停止 {name} (PID={pid})")
+                    os.kill(pid, signal.SIGKILL)
+                    if verbose:
+                        print(f"   ✅ 已强制停止 {name} (PID={pid})")
                 except ProcessLookupError:
                     pass  # 进程已停止
             except ProcessLookupError:
-                print(f"   ℹ️  进程 PID={pid} 已不存在")
+                if verbose:
+                    print(f"   ℹ️  进程 PID={pid} 已不存在")
     except Exception as e:
-        print(f"   ⚠️  停止进程时出错: {e}")
+        if verbose:
+            print(f"   ⚠️  停止进程时出错: {e}")
+
+
+def _cleanup_all_processes():
+    """
+    清理所有正在运行的agent扫描进程并更新agents.json
+    在退出交互模式时调用
+    注意：只停止进程，不删除文件夹，保留agents.json中的agent记录，只标记为idle
+    """
+    from secretary.agents import list_workers, update_worker_status
     
-    # 尝试停止进程
-    print(f"\n🛑 停止 worker '{worker_name}' (PID={pid})...")
-    try:
-        if sys.platform == "win32":
-            # Windows: 先检查进程是否存在
-            check_result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                timeout=5,
-            )
-            
-            # 检查进程是否存在
-            process_exists = False
-            if check_result.returncode == 0 and check_result.stdout:
-                try:
-                    output = check_result.stdout.decode("gbk", errors="ignore")
-                    if str(pid) in output and "信息" not in output:
-                        process_exists = True
-                except:
-                    # 如果解码失败，尝试直接检查
-                    if str(pid).encode() in check_result.stdout:
-                        process_exists = True
-            
-            if not process_exists:
-                print(f"   ℹ️  进程 PID={pid} 已不存在")
-            else:
-                # 进程存在，强制杀死
-                result = subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=10,
-                )
-                
-                # 再次检查进程是否还存在
-                verify_result = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                    capture_output=True,
-                    timeout=5,
-                )
-                
-                still_exists = False
-                if verify_result.returncode == 0 and verify_result.stdout:
-                    try:
-                        output = verify_result.stdout.decode("gbk", errors="ignore")
-                        if str(pid) in output and "信息" not in output:
-                            still_exists = True
-                    except:
-                        if str(pid).encode() in verify_result.stdout:
-                            still_exists = True
-                
-                if not still_exists:
-                    print(f"   ✅ 已停止 worker '{worker_name}' (PID={pid})")
-                    # 更新 worker 状态：清除 pid，设置为 idle
-                    update_worker_status(worker_name, "idle", pid=None)
-                    print(f"   📝 已更新 worker '{worker_name}' 状态为 idle，PID 已清除")
-                else:
-                    print(f"   ⚠️  无法停止进程 PID={pid}，进程仍在运行")
-                    # 即使无法停止，也清除记录的 PID（可能进程已经换了）
-                    update_worker_status(worker_name, "idle", pid=None)
-                    print(f"   📝 已清除 worker '{worker_name}' 的 PID 记录")
+    workers = list_workers()
+    stopped_count = 0
+    updated_count = 0
+    
+    print("🛑 正在停止所有扫描进程（保留agent配置）...")
+    
+    # 先同步agents.json中的进程到队列（确保队列完整）
+    _sync_processes_to_queue()
+    
+    # 遍历所有进程队列中的进程（包括已崩溃的）
+    # 使用 list() 创建副本，避免在遍历时修改队列
+    all_procs = list(_active_processes)
+    processed_names = set()
+    
+    for proc_info in all_procs:
+        proc_name = proc_info.get("name")
+        proc_pid = proc_info.get("pid")
+        
+        if not proc_pid:
+            continue
+        
+        # 避免重复处理（可能队列中有重复项）
+        if proc_name in processed_names:
+            continue
+        processed_names.add(proc_name)
+        
+        # 检查进程是否真的存在
+        if _check_process_exists(proc_pid):
+            # 进程存在，停止它
+            print(f"   停止 {proc_name} (PID={proc_pid})...")
+            _stop_process(proc_pid, proc_name, verbose=False)
+            stopped_count += 1
         else:
-            # Unix/Linux: 使用 kill
-            try:
-                os.kill(pid, 15)  # SIGTERM
-                print(f"   ✅ 已发送停止信号给 worker '{worker_name}' (PID={pid})")
-                # 等待一下，如果还没停止就强制杀死
-                import time
-                time.sleep(1)
-                try:
-                    os.kill(pid, 0)  # 检查进程是否还存在
-                    os.kill(pid, 9)  # SIGKILL
-                    print(f"   ✅ 已强制停止 worker '{worker_name}' (PID={pid})")
-                except ProcessLookupError:
-                    pass  # 进程已停止
-                # 更新 worker 状态：清除 pid，设置为 idle
-                update_worker_status(worker_name, "idle", pid=None)
-                print(f"   📝 已更新 worker '{worker_name}' 状态为 idle，PID 已清除")
-            except ProcessLookupError:
-                print(f"   ℹ️  进程 PID={pid} 已不存在")
-                # 即使进程不存在，也清除记录的 PID
-                update_worker_status(worker_name, "idle", pid=None)
-                print(f"   📝 已清除 worker '{worker_name}' 的 PID 记录")
-    except Exception as e:
-        print(f"   ⚠️  停止进程时出错: {e}")
-        # 即使出错，也尝试清除 PID 记录
-        try:
-            update_worker_status(worker_name, "idle", pid=None)
-            print(f"   📝 已清除 worker '{worker_name}' 的 PID 记录")
-        except:
+            # 进程不存在（可能已崩溃），只清理记录
             pass
+        
+        # 更新agents.json中的状态为idle，保留agent记录
+        for worker in workers:
+            if worker.get("name") == proc_name:
+                update_worker_status(proc_name, "idle", pid=None)
+                updated_count += 1
+                break
+        
+        # 从队列中移除
+        _remove_process(agent_name=proc_name)
+    
+    # 清理agents.json中其他有PID但不在队列中的记录
+    for worker in workers:
+        worker_name = worker.get("name")
+        pid = worker.get("pid")
+        status = worker.get("status", "unknown")
+        
+        if not pid:
+            # 没有PID，但可能status不是idle，确保更新为idle（保留agent记录）
+            if status != "idle":
+                update_worker_status(worker_name, "idle", pid=None)
+                updated_count += 1
+            continue
+        
+        # 如果不在已处理的列表中，说明可能已经清理过了，或者需要清理
+        if worker_name not in processed_names:
+            # 检查进程是否真的存在
+            if not _check_process_exists(pid):
+                # 进程不存在，清理记录并更新agents.json为idle（保留agent记录）
+                update_worker_status(worker_name, "idle", pid=None)
+                updated_count += 1
+            else:
+                # 进程存在但不在队列中，停止它
+                print(f"   停止 {worker_name} (PID={pid})...")
+                _stop_process(pid, worker_name, verbose=False)
+                update_worker_status(worker_name, "idle", pid=None)
+                stopped_count += 1
+                updated_count += 1
+    
+    # 清空进程队列
+    _active_processes.clear()
+    
+    if stopped_count > 0 or updated_count > 0:
+        print(f"   ✅ 已停止 {stopped_count} 个进程，更新 {updated_count} 个agent状态为idle")
+        print(f"   📁 Agent配置和文件夹已保留，下次启动时会自动恢复")
+    else:
+        print(f"   ℹ️  没有需要停止的进程")
 
 
 def cmd_check(args):
@@ -959,70 +1124,46 @@ def cmd_check(args):
     
     worker_name = getattr(args, "worker_name", None)
     if not worker_name:
-        print("❌ 请指定要查看的对象: worker 名、kai 或 keep")
-        print(f"   用法: {_cli_name()} check <worker_name|kai|keep>")
-        print(f"   示例: {_cli_name()} check sen  |  {_cli_name()} check kai  |  {_cli_name()} check keep")
+        print("❌ 请指定要查看的对象: agent 名称")
+        print(f"   用法: {_cli_name()} check <agent_name>")
+        print(f"   示例: {_cli_name()} check sen  |  {_cli_name()} check yks")
         return
     
-    # 检查是否是查看 kai 相关日志
-    if worker_name.lower() == "kai":
-        log_file = cfg.KAI_SCANNER_LOG
-        if not log_file.exists():
-            print(f"❌ Kai 的 scanner 日志不存在: {log_file.name}")
-            print(f"   路径: {log_file}")
-            print(f"   使用 `{_cli_name()} start kai` 启动 kai 的扫描器；keep 日志: `{_cli_name()} check keep`")
-            return
-        print(f"\n📺 实时查看 kai 的 scanner 输出")
-        print(f"   日志: {log_file}")
-        print(f"   按 'q' 退出查看模式")
-        print(f"   按 Ctrl+C 退出")
-        print(f"{'='*60}\n")
-    elif worker_name.lower() == "keep":
-        log_file = cfg.KAI_KEEP_LOG
-        if not log_file.exists():
-            print(f"❌ Keep 日志不存在: {log_file.name}")
-            print(f"   路径: {log_file}")
-            print(f"   使用 `{_cli_name()} keep \"目标\"` 启动持续监控后会产生此日志")
-            return
-        print(f"\n📺 实时查看 keep 模式输出")
-        print(f"   日志: {log_file}")
-        print(f"   按 'q' 退出查看模式")
-        print(f"   按 Ctrl+C 退出")
-        print(f"{'='*60}\n")
+    # 检查 agent 是否存在（统一处理所有类型，包括secretary）
+    worker = get_worker(worker_name)
+    if not worker:
+        print(f"❌ Agent '{worker_name}' 不存在")
+        print(f"   使用 `{_cli_name()} monitor` 查看所有 agent")
+        return
+    
+    # 检查 agent 是否在运行
+    pid = worker.get("pid")
+    pid_info = ""
+    if pid and _check_process_exists(pid):
+        pid_info = f" (PID={pid})"
     else:
-        # 检查 worker 是否存在
-        worker = get_worker(worker_name)
-        if not worker:
-            print(f"❌ Worker '{worker_name}' 不存在")
-            print(f"   使用 `{_cli_name()} workers` 查看所有 worker")
-            return
-        
-        # 检查 worker 是否在运行
-        pid = worker.get("pid")
-        pid_info = ""
-        if pid and _check_process_exists(pid):
-            pid_info = f" (PID={pid})"
-        else:
-            print(f"ℹ️  Worker '{worker_name}' 没有运行中的进程")
-            print(f"   使用 `{_cli_name()} start {worker_name}` 启动 worker")
-            # 即使没有运行，也允许查看日志
-        
-        # 使用固定的日志文件
-        log_dir = _worker_logs_dir(worker_name)
-        if not log_dir.exists():
-            print(f"❌ Worker '{worker_name}' 的日志目录不存在")
-            return
-        
-        log_file = log_dir / "scanner.log"
-        if not log_file.exists():
-            print(f"❌ Worker '{worker_name}' 没有找到日志文件 (scanner.log)")
-            return
-        
-        print(f"\n📺 实时查看 worker '{worker_name}' 的输出{pid_info}")
-        print(f"   日志文件: {log_file.name}")
-        print(f"   按 'q' 退出查看模式（不打断 worker）")
-        print(f"   按 Ctrl+C 打断 worker 执行")
-        print(f"{'='*60}\n")
+        agent_type = worker.get("type", "agent")
+        print(f"ℹ️  {agent_type.capitalize()} '{worker_name}' 没有运行中的进程")
+        print(f"   使用 `{_cli_name()} hire {worker_name} {agent_type}` 启动")
+        # 即使没有运行，也允许查看日志
+    
+    # 统一使用 agents/<name>/logs/scanner.log
+    log_dir = _worker_logs_dir(worker_name)
+    if not log_dir.exists():
+        print(f"❌ Agent '{worker_name}' 的日志目录不存在")
+        return
+    
+    log_file = log_dir / "scanner.log"
+    if not log_file.exists():
+        print(f"❌ Agent '{worker_name}' 没有找到日志文件 (scanner.log)")
+        return
+    
+    agent_type = worker.get("type", "agent")
+    print(f"\n📺 实时查看 {agent_type} '{worker_name}' 的输出{pid_info}")
+    print(f"   日志文件: {log_file}")
+    print(f"   按 'q' 退出查看模式（不打断进程）")
+    print(f"   按 Ctrl+C 打断进程执行")
+    print(f"{'='*60}\n")
     
     # 用于控制循环的标志
     should_exit = threading.Event()
@@ -1143,9 +1284,10 @@ def cmd_check(args):
         should_stop_worker.set()
         should_exit.set()
     
-    # 如果用户按了 Ctrl+C，停止 worker（仅当查看普通 worker 时；kai/keep 不关联 PID）
-    if should_stop_worker.is_set() and worker_name.lower() not in ("kai", "keep"):
-        print(f"\n\n🛑 正在停止 worker '{worker_name}' (PID={pid})...")
+    # 如果用户按了 Ctrl+C，停止 agent（仅当 agent 有 PID 时）
+    agent_type = worker.get("type", "agent")
+    if should_stop_worker.is_set() and pid:
+        print(f"\n\n🛑 正在停止 {agent_type} '{worker_name}' (PID={pid})...")
         # 调用 stop 命令的逻辑
         try:
             if sys.platform == "win32":
@@ -1163,29 +1305,35 @@ def cmd_check(args):
                 except ProcessLookupError:
                     pass
             
-            # 更新 worker 状态
+            # 更新 agent 状态
             update_worker_status(worker_name, "idle", pid=None)
-            print(f"   ✅ Worker '{worker_name}' 已停止")
+            print(f"   ✅ {agent_type.capitalize()} '{worker_name}' 已停止")
         except Exception as e:
-            print(f"   ⚠️  停止 worker 时出错: {e}")
+            print(f"   ⚠️  停止 {agent_type} 时出错: {e}")
     else:
-        if worker_name.lower() == "kai":
-            print(f"\n\n👋 退出查看模式")
+        if pid:
+            print(f"\n\n👋 退出查看模式（{agent_type} '{worker_name}' 继续运行）")
         else:
-            print(f"\n\n👋 退出查看模式（worker '{worker_name}' 继续运行）")
+            print(f"\n\n👋 退出查看模式")
 
 
 def cmd_clean_logs(args):
-    """清空 logs/ 目录下的日志文件"""
+    """清空所有 agent 的 logs/ 目录下的日志文件"""
     removed = 0
-    if cfg.LOGS_DIR.exists():
-        for f in cfg.LOGS_DIR.iterdir():
-            if f.is_file():
-                try:
-                    f.unlink()
-                    removed += 1
-                except OSError as e:
-                    print(f"   ⚠️ 删除失败 {f.name}: {e}")
+    if cfg.AGENTS_DIR.exists():
+        for agent_dir in cfg.AGENTS_DIR.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            logs_dir = agent_dir / "logs"
+            if not logs_dir.exists():
+                continue
+            for f in logs_dir.iterdir():
+                if f.is_file():
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except OSError as e:
+                        print(f"   ⚠️ 删除失败 {f.name}: {e}")
     print(f"🧹 已清理 logs/ 下 {removed} 个日志文件")
 
 
@@ -1281,7 +1429,7 @@ def cmd_base(args):
 
     cfg.apply_base_dir(new_path)
     cfg.ensure_dirs()
-    print(f"   📂 已创建目录结构 (tasks/, ongoing/, report/, skills/ ...)")
+    print(f"   📂 已创建目录结构 (tasks/, assigned/, logs/, skills/ ...)")
     print(f"\n   之后无论在哪里运行 {name}，都会操作这个目录。")
     print(f"   如需清除: {name} base --clear")
 
@@ -1375,35 +1523,101 @@ def cmd_model(args):
 # ============================================================
 
 def cmd_target(args):
-    """设定、列出或清空秘书的全局目标 (kai target / kai target --clear / kai target 任务1 任务2)"""
-    from secretary.secretary_agent import get_goals, set_goals, clear_goals
-
-    if getattr(args, "clear", False):
-        clear_goals()
-        print(f"\n🧹 已清空当前全局目标")
-        print(f"   秘书后续做任务归类与分配时不再带有全局目标上下文")
+    """创建Boss Agent的别名：target "tasks" = boss yks "tasks" ykc"""
+    # 解析参数：target "目标描述"
+    goal = " ".join(args.goal) if isinstance(args.goal, list) else args.goal
+    
+    if not goal:
+        print(f"❌ 请提供目标描述")
+        print(f"   用法: {_cli_name()} target \"目标描述\"")
+        print(f"   示例: {_cli_name()} target \"完成登录模块\"")
         return
-
-    goals_list = getattr(args, "goals", None) or []
-    if not goals_list:
-        goals = get_goals()
-        name = _cli_name()
-        if not goals:
-            print(f"\n🎯 当前全局目标: (无)")
-            print(f"   用法: {name} target 任务1 任务2  ...  设定目标")
-            print(f"        {name} target --clear           清空目标")
-            return
-        print(f"\n🎯 当前全局目标 ({len(goals)} 个):\n")
-        for i, g in enumerate(goals, 1):
-            print(f"   {i}. {g}")
-        print(f"\n   清空: {name} target --clear")
-        return
-
-    set_goals(goals_list)
-    print(f"\n🎯 已设定全局目标 ({len(goals_list)} 个):")
-    for i, g in enumerate(goals_list, 1):
-        print(f"   {i}. {g}")
-    print(f"\n   秘书在 kai task ... 时会看到这些目标并与之对齐。")
+    
+    # 使用智能名字选择，优先使用yks和ykc，如果被占用则选择其他可用名字
+    import secretary.config as cfg
+    from secretary.agents import register_agent, get_worker, pick_available_name
+    
+    # 选择boss名称（优先yks，如果被占用则选择其他）
+    boss_name = pick_available_name(preferred_names=["yks", "ykx", "yky", "aks", "akx"])
+    
+    # 选择worker名称（优先ykc，如果被占用则选择其他，但要确保和boss_name不同）
+    worker_candidates = ["ykc", "ykz", "aky", "akz", "akc"]
+    # 如果boss_name在候选列表中，移除它
+    worker_candidates = [n for n in worker_candidates if n != boss_name]
+    worker_name = pick_available_name(preferred_names=worker_candidates)
+    
+    # 确保worker存在（如果不存在则创建）
+    worker_created = False
+    if not get_worker(worker_name):
+        register_agent(worker_name, agent_type="worker", description=f"由Boss {boss_name}监控的Worker")
+        print(f"✅ 已创建worker: {worker_name}")
+        worker_created = True
+    
+    # 如果worker是新创建的，自动启动它的扫描器
+    if worker_created:
+        _start_agent_scanner(worker_name, "worker", silent=False)
+    
+    # 创建boss目录和配置
+    boss_dir = cfg.AGENTS_DIR / boss_name
+    boss_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 创建必要的子目录
+    (boss_dir / "tasks").mkdir(parents=True, exist_ok=True)
+    (boss_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (boss_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (boss_dir / "stats").mkdir(parents=True, exist_ok=True)
+    
+    # 写入目标文件
+    goal_file = boss_dir / "goal.md"
+    goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
+    
+    # 写入配置文件
+    config_file = boss_dir / "config.md"
+    config_file.write_text(
+        f"# Boss配置\n\n"
+        f"监控的Worker: {worker_name}\n"
+        f"持续目标: {goal[:100]}...\n",
+        encoding="utf-8"
+    )
+    
+    # 注册boss agent（如果不存在，检查是否已被其他类型占用）
+    existing_boss = get_worker(boss_name)
+    if not existing_boss:
+        register_agent(boss_name, agent_type="boss", description=f"Boss: {goal[:50]}")
+    elif existing_boss.get("type") != "boss":
+        # 如果名字已被其他类型占用，选择新名字
+        from secretary.agents import pick_available_name
+        new_boss_candidates = ["yks", "ykx", "yky", "aks", "akx"]
+        new_boss_candidates = [n for n in new_boss_candidates if n != boss_name and n != worker_name]
+        boss_name = pick_available_name(preferred_names=new_boss_candidates)
+        # 确保新名字和worker_name不同
+        while boss_name == worker_name:
+            boss_name = pick_available_name(preferred_names=new_boss_candidates)
+        if not get_worker(boss_name):
+            register_agent(boss_name, agent_type="boss", description=f"Boss: {goal[:50]}")
+        # 更新boss_dir路径和配置文件
+        boss_dir = cfg.AGENTS_DIR / boss_name
+        boss_dir.mkdir(parents=True, exist_ok=True)
+        (boss_dir / "tasks").mkdir(parents=True, exist_ok=True)
+        (boss_dir / "reports").mkdir(parents=True, exist_ok=True)
+        (boss_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (boss_dir / "stats").mkdir(parents=True, exist_ok=True)
+        goal_file = boss_dir / "goal.md"
+        goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
+        config_file = boss_dir / "config.md"
+        config_file.write_text(
+            f"# Boss配置\n\n"
+            f"监控的Worker: {worker_name}\n"
+            f"持续目标: {goal[:100]}...\n",
+            encoding="utf-8"
+        )
+    
+    # 使用统一的启动函数启动boss扫描器
+    _start_agent_scanner(boss_name, "boss", silent=False)
+    
+    print(f"✅ Boss '{boss_name}' 已创建并启动")
+    print(f"   持续目标: {goal}")
+    print(f"   监控Worker: {worker_name}")
 
 
 def cmd_report(args):
@@ -1493,9 +1707,9 @@ def _print_worker_report(worker_name: str):
     else:
         print("   (无)")
     
-    # 3. 已完成报告（report/ 目录）
+    # 3. 已完成报告（report/ 目录，存在则读）
     reports = sorted(
-        [r for r in cfg.REPORT_DIR.glob("*-report.md")],
+        [],
         key=lambda p: p.stat().st_mtime,
         reverse=True
     )
@@ -1592,12 +1806,14 @@ def _print_all_reports():
     else:
         print("   (无)")
     
-    # 3. 已解决任务（solved-report/）
+    # 3. 已解决任务（从recycler的solved目录读取）
+    recycler_dir = cfg.AGENTS_DIR / "recycler"
+    solved_dir = recycler_dir / "solved"
     solved_reports = sorted(
-        cfg.SOLVED_DIR.glob("*-report.md"),
+        solved_dir.glob("*-report.md"),
         key=lambda p: p.stat().st_mtime,
         reverse=True
-    ) if cfg.SOLVED_DIR.exists() else []
+    ) if solved_dir.exists() else []
     
     print(f"\n✅ 已解决任务 (共 {len(solved_reports)} 个):")
     if solved_reports:
@@ -1623,12 +1839,13 @@ def _print_all_reports():
     else:
         print("   (无)")
     
-    # 4. 未解决任务（unsolved-report/）
+    # 4. 未解决任务（从recycler的unsolved目录读取）
+    unsolved_dir = recycler_dir / "unsolved"
     unsolved_reports = sorted(
-        cfg.UNSOLVED_DIR.glob("*-report.md"),
+        unsolved_dir.glob("*-report.md"),
         key=lambda p: p.stat().st_mtime,
         reverse=True
-    ) if cfg.UNSOLVED_DIR.exists() else []
+    ) if unsolved_dir.exists() else []
     
     print(f"\n❌ 未解决任务 (共 {len(unsolved_reports)} 个):")
     if unsolved_reports:
@@ -1651,7 +1868,9 @@ def _print_all_reports():
                 print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
                 
                 # 尝试读取未解决原因
-                reason_file = cfg.UNSOLVED_DIR / f"{task_name}-unsolved-reason.md"
+                recycler_dir = cfg.AGENTS_DIR / "recycler"
+                unsolved_dir = recycler_dir / "unsolved"
+                reason_file = unsolved_dir / f"{task_name}-unsolved-reason.md"
                 if reason_file.exists():
                     try:
                         reason = reason_file.read_text(encoding="utf-8").strip().splitlines()
@@ -1666,10 +1885,10 @@ def _print_all_reports():
     
     # 5. 待审查报告（report/）
     pending_reports = sorted(
-        cfg.REPORT_DIR.glob("*-report.md"),
+        [],
         key=lambda p: p.stat().st_mtime,
         reverse=True
-    ) if cfg.REPORT_DIR.exists() else []
+    )
     
     print(f"\n📄 待审查报告 (共 {len(pending_reports)} 个):")
     if pending_reports:
@@ -1747,32 +1966,39 @@ def cmd_help(args):
   --worker         直接分配给指定的agent,跳过秘书判断
 
 说明:
-  如果不指定worker,任务会写入 agents/kai/tasks/ 目录,由kai的扫描器处理。
-  确保kai的扫描器正在运行 (`{name} start kai`),否则任务不会被处理。
-  使用 `{name} check kai` 查看kai的处理日志。
+  如果不指定worker,任务会写入 secretary agent 的 tasks/ 目录,由secretary的扫描器处理。
+  确保secretary的扫描器正在运行 (`{name} hire <name> secretary`),否则任务不会被处理。
+  使用 `{name} check <secretary_name>` 查看secretary的处理日志。
 
 示例:
   {name} task "实现一个HTTP服务器"
   {name} task "优化性能" --time 120
   {name} task "修复bug" --worker sen
 """,
-            "keep": f"""
-🔄 持续监控模式
+            "boss": f"""
+👔 创建并启动 Boss Agent
 
 用法:
-  {name} keep "持续目标"
-  {name} keep "持续目标" --worker sen
+  {name} boss <boss名称> "持续目标" <worker名称>
+  {name} boss <boss名称> "持续目标" <worker名称> --once
 
 说明:
-  为指定worker持续生成任务以推进目标。当任务队列为空时,自动生成新任务。
-  后台执行,输出写入worker的scanner.log。使用 `{name} check <worker_name>` 查看输出。
+  创建并启动一个 Boss Agent，监控指定 worker 的任务队列；当队列为空时，
+  根据持续目标自动生成新任务并写入该 worker 的 tasks 目录。
 
 参数:
-  goal             持续目标描述 (必需)
-  --worker         指定的worker名称,默认为默认worker
+  boss_name        Boss 名称 (必需)
+  goal            持续目标描述 (必需，可多个词)
+  worker_name     被监控的 worker 名称 (必需)
+  --once          只执行一次检查与生成，不常驻后台
 
 示例:
-  {name} keep "开发一个完整的Web应用" --worker sen
+  {name} boss myboss "完成登录模块" sen
+  {name} boss daily "每日代码审查" alice --once
+
+查看与停止:
+  {name} check <boss名称>  查看 Boss 日志
+  {name} fire <boss名称>  停止并删除该 Boss
 """,
             "use": f"""
 🎯 使用技能
@@ -1840,24 +2066,29 @@ def cmd_help(args):
   - debug: 调试
 """,
             "hire": f"""
-👷 招募工作者
+👷 招募并启动 agent
 
 用法:
-  {name} hire
-  {name} hire <名字>
+  {name} hire [<名字>] [<类型>]
+  {name} hire alice worker
+  {name} hire recycler recycler
+  {name} hire <name> secretary
   {name} hire alice -d "负责前端开发"
 
 说明:
-  招募一个worker(只注册,不启动)。不指定名字则随机生成。
+  招募并启动 agent。不指定名字则随机生成，不指定类型则默认为 worker。
 
 参数:
-  worker_name      工人名称 (可选)
-  -d, --description 工人描述
+  name              agent 名称 (可选)
+  type              agent 类型 (可选): secretary / worker / recycler
+  -d, --description 描述
 
 示例:
   {name} hire
   {name} hire alice
-  {name} hire bob -d "后端开发专家"
+  {name} hire alice worker
+  {name} hire recycler recycler
+  {name} hire <name> secretary
 """,
             "start": f"""
 🚀 启动worker扫描器
@@ -1946,36 +2177,18 @@ def cmd_help(args):
   {name} monitor -i 5
   {name} monitor --text
 """,
-            "stop": f"""
-🛑 停止worker进程
-
-用法:
-  {name} stop <worker_name>
-
-说明:
-  停止指定worker的扫描进程。
-
-参数:
-  worker_name      要停止的worker名称 (必需)
-
-示例:
-  {name} stop sen
-  {name} stop alice
-""",
             "check": f"""
-📺 实时查看 worker / kai / keep 的日志
+📺 实时查看 agent 的日志
 
 用法:
-  {name} check <worker_name>
-  {name} check kai
-  {name} check keep
-  {name} check <worker_name> --tail 50
+  {name} check <agent_name>
+  {name} check <agent_name> --tail 50
 
 说明:
-  实时 tail 后台进程的日志。kai = agents/kai/logs/scanner.log；keep = agents/kai/logs/keep.log；worker = agents/<name>/logs/scanner.log。
+  实时 tail 后台进程的日志。所有 agent 的日志都在 agents/<name>/logs/scanner.log。
 
 参数:
-  worker_name      worker 名、kai 或 keep (必需)
+  worker_name      worker 名或 kai (必需)
   --tail           只显示最后 N 行
 
 操作:
@@ -1985,7 +2198,6 @@ def cmd_help(args):
 示例:
   {name} check sen
   {name} check kai
-  {name} check keep
   {name} check ykc --tail 100
 """,
             "clean-logs": f"""
@@ -2100,6 +2312,23 @@ def cmd_help(args):
   {name} report alice
   {name} report all
 """,
+            "help": f"""
+❓ 显示帮助信息
+
+用法:
+  {name} help
+  {name} help <命令名>
+
+说明:
+  不指定命令名时，显示快速开始与完整命令列表。
+  指定命令名时，显示该命令的详细用法与说明。
+
+示例:
+  {name} help
+  {name} help task
+  {name} help boss
+  {name} help monitor
+""",
         }
         
         if cmd_name in cmd_helps:
@@ -2150,7 +2379,7 @@ def _print_command_list(name: str):
     commands = [
         ("📝 任务相关", [
             ("task", "提交任务 (经秘书Agent分类)"),
-            ("keep", "持续监控模式,自动生成任务推进目标"),
+            ("boss", "创建并启动Boss Agent，监控worker并在队列空时生成任务"),
         ]),
         ("📚 技能相关", [
             ("skills", "列出所有已学技能"),
@@ -2159,12 +2388,11 @@ def _print_command_list(name: str):
             ("use", "使用技能 (直接写入tasks/)"),
         ]),
         ("👷 Worker管理", [
-            ("hire", "招募worker (只注册,不启动)"),
-            ("start", "启动worker扫描器"),
-            ("fire", "解雇worker"),
-            ("workers", "列出所有worker"),
-            ("stop", "停止worker进程"),
-            ("check", "实时查看worker输出"),
+            ("hire", "招募并启动 agent (secretary/worker/recycler)"),
+            ("start", "启动 agent 扫描器"),
+            ("fire", "解雇 worker"),
+            ("workers", "列出所有 worker"),
+            ("check", "实时查看 worker/kai 日志输出"),
         ]),
         ("♻️ 后台服务", [
             ("recycle", "启动回收者 (审查报告)"),
@@ -2177,7 +2405,7 @@ def _print_command_list(name: str):
             ("base", "设定/查看工作区目录"),
             ("name", "给CLI命令改名"),
             ("model", "设置或查看AI模型"),
-            ("target", "设定/列出/清空全局目标"),
+            ("target", "创建Boss Agent的别名"),
         ]),
         ("🧹 清理", [
             ("clean-logs", "清理日志文件"),
@@ -2209,17 +2437,36 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     name = _cli_name()
     prompt = f"{name}> "
 
+    # 确保目录结构存在
+    cfg.ensure_dirs()
+    
+    # 恢复所有已注册的agent（它们的状态已经在agents.json中）
+    from secretary.agents import list_workers
+    
+    all_agents = list_workers()
+    if all_agents:
+        print(f"   📋 检测到 {len(all_agents)} 个已注册的agent")
+    
+    # 自动启动所有已注册但未运行的agents
+    try:
+        started_count = _auto_start_agents(silent=True)
+        # 即使静默启动，也显示启动的agent数量（如果有）
+        # 这样用户知道系统正在工作
+        if started_count > 0:
+            print(f"   🔄 已自动启动 {started_count} 个agent扫描器")
+    except Exception as e:
+        # 自动启动失败不应该影响交互模式，但记录错误以便调试
+        # 在交互模式下，静默处理错误，避免影响用户体验
+        # 如果需要调试，可以查看日志文件或使用非静默模式
+        pass
+    
     # 打印欢迎信息 + 首次状态栏
     print(f"\n🔄 {name} 交互模式 — 输入子命令，exit 退出，monitor 监控面板")
     try:
         from secretary.dashboard import print_status_line
-        cfg.ensure_dirs()
         print_status_line()
     except Exception:
         pass
-    
-    # 自动启动功能已关闭
-    # 如需启动 worker，请手动运行: kai start sen
     
     print()
 
@@ -2232,12 +2479,17 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             continue
         except EOFError:
             # Ctrl+D: 退出
+            print(f"👋 退出 {name}")
+            _cleanup_all_processes()
             print()
             break
         if not line:
             continue
         if line.lower() == "exit":
-            print(f"👋 退出 {name}\n")
+            print(f"👋 退出 {name}")
+            # 清理所有正在运行的扫描进程
+            _cleanup_all_processes()
+            print()
             break
         if line.lower() == "bar":
             try:
@@ -2352,7 +2604,7 @@ def main():
   {name} hire alice                 👷 招募叫 alice 的 worker
   {name} start sen                  🚀 启动 sen agent 的扫描器
   {name} start alice                🚀 启动 alice agent 的扫描器
-  {name} start kai                  🤖 启动 kai 的扫描器 (处理 agents/kai/tasks/ 中的任务)
+  {name} hire <name> secretary      🤖 创建并启动 secretary agent
   {name} fire alice                 🔥 解雇 alice
   {name} workers                    📋 列出所有工人
 
@@ -2365,8 +2617,8 @@ def main():
 内置技能: evolving | analysis | debug
 
 后台:
-  {name} hire [名字]                👷 招募工作者 (只注册)
-  {name} start [名字]               🚀 启动 agent 扫描器 (开始处理任务); 使用 'kai' 启动 kai 的扫描器
+  {name} hire <name> <type>        👷 招募并启动agent (type: secretary/worker/recycler)
+  {name} boss <name> "目标" <worker>  👔 创建Boss Agent监控worker
   {name} recycle                    ♻️ 启动回收者 (每2分钟审查)
   {name} monitor                    📺 实时监控面板 (TUI)
 
@@ -2378,15 +2630,13 @@ def main():
   {name} model                      🤖 查看当前模型设置
   {name} model Auto                 🤖 设置模型为 Auto
   {name} model gpt-4                🤖 设置模型为 gpt-4
-  {name} target 任务1 任务2         🎯 设定秘书全局目标
-  {name} target --clear             🎯 清空全局目标
-  {name} target                     🎯 列出当前全局目标
+  {name} target "目标描述"          🎯 创建Boss Agent (boss yks "目标" ykc)
 
 监控与控制:
   {name} monitor                    📺 实时监控面板 (TUI)
   {name} monitor --text             📊 查看系统状态 (文本快照)
   {name} monitor -i 5               📺 监控面板，每 5 秒刷新
-  {name} stop <worker>               🛑 停止指定 worker 的进程
+  {name} check <worker|kai>         📺 实时查看日志输出
   {name} clean-logs                 🧹 清理日志文件
         """,
     )
@@ -2412,10 +2662,13 @@ def main():
     p.add_argument("--time", type=int, default=0, help=time_help)
     p.add_argument("--worker", type=str, default=None, help="直接分配给指定的 worker，跳过秘书判断")
     
-    # ---- keep ----
-    p = subparsers.add_parser("keep", help="🔄 持续监控模式：为指定 worker 持续生成任务以推进目标")
+    # ---- boss ----
+    p = subparsers.add_parser("boss", help="👔 创建并启动Boss Agent：监控指定worker，在队列为空时生成新任务")
+    p.add_argument("boss_name", help="Boss名称")
     p.add_argument("goal", nargs="+", help="持续目标描述")
-    p.add_argument("--worker", type=str, default=None, help="指定的 worker 名称，默认为默认 worker")
+    p.add_argument("worker_name", help="监控的worker名称")
+    p.add_argument("--once", action="store_true", help="只执行一次")
+    
 
     # ---- use <skill> ----
     p = subparsers.add_parser("use", help="🎯 使用技能 (直接写入 tasks/)")
@@ -2435,15 +2688,15 @@ def main():
     subparsers.add_parser("skills", help="📚 列出所有已学技能")
 
     # ---- hire ----
-    p = subparsers.add_parser("hire", help="👷 招募工作者 (只注册，不启动)")
+    p = subparsers.add_parser("hire", help="👷 招募并启动 agent (name [type]，type: secretary/worker/recycler)")
     p.add_argument("worker_names", nargs="*", default=None,
-                   help="工人名，可多个 (如 alice bob); 不填则随机取名一个")
-    p.add_argument("-d", "--description", type=str, default="", help="工人描述")
+                   help="agent 名与可选类型 (如 alice worker, recycler recycler); 不填则随机取名且 type=worker")
+    p.add_argument("-d", "--description", type=str, default="", help="描述")
 
     # ---- start ----
     p = subparsers.add_parser("start", help="🚀 启动 agent 扫描器 (开始处理任务)")
     p.add_argument("worker_names", nargs="*", default=None,
-                   help="Agent名，可多个 (如 alice bob kai); 不填则启动默认 agent (sen)")
+                   help="Agent名，可多个 (如 alice bob); 不填则启动默认 agent (sen)")
     p.add_argument("--once", action="store_true", help="只执行一次")
 
     # ---- fire ----
@@ -2478,9 +2731,8 @@ def main():
     p.add_argument("--once", action="store_true", help="输出一次文本快照后退出")
 
     # ---- target ----
-    p = subparsers.add_parser("target", help="🎯 设定/列出/清空秘书全局目标")
-    p.add_argument("goals", nargs="*", help="任务描述 (如: 完成登录模块 优化性能)")
-    p.add_argument("--clear", action="store_true", help="清空当前全局目标")
+    p = subparsers.add_parser("target", help="🎯 创建Boss Agent的别名：target \"tasks\" = boss yks \"tasks\" ykc")
+    p.add_argument("goal", nargs="+", help="持续目标描述")
 
     # ---- report ----
     p = subparsers.add_parser("report", help="📋 查看任务报告 (worker report 或 all report)")
@@ -2492,29 +2744,25 @@ def main():
     p.add_argument("command_name", nargs="?", default=None,
                    help="命令名称 (可选,显示特定命令的详细帮助)")
 
-    # ---- stop / check / clean-logs / clean-processes ----
-    p = subparsers.add_parser("stop", help="🛑 停止指定 worker 的进程")
-    p.add_argument("worker_names", nargs="+", help="要停止的 worker 名称，可多个 (如 sen bob)")
-    p = subparsers.add_parser("check", help="📺 实时查看 worker/kai/keep 的日志输出")
-    p.add_argument("worker_name", help="worker 名 (如 sen)、kai（scanner 日志）或 keep（keep 模式日志）")
+    # ---- check / clean-logs / clean-processes ----
+    p = subparsers.add_parser("check", help="📺 实时查看 agent 的日志输出")
+    p.add_argument("worker_name", help="agent 名称 (如 sen、yks 等)")
     p.add_argument("--tail", type=int, default=0, help="只显示最后 N 行（默认显示所有内容）")
     subparsers.add_parser("clean-logs", help="🧹 清理 logs/ 下的日志文件")
     subparsers.add_parser("clean-processes", help="🧹 清理泄露的 worker 进程记录")
 
     handlers = {
         "task": cmd_task,
-        "keep": cmd_keep,
+        "boss": cmd_boss,
         "use": cmd_use_skill,
         "learn": cmd_learn,
         "forget": cmd_forget,
         "skills": cmd_skills,
         "hire": cmd_hire,
-        "start": cmd_start,
         "fire": cmd_fire,
         "workers": cmd_workers,
         "recycle": cmd_recycle,
         "monitor": cmd_monitor,
-        "stop": cmd_stop,
         "check": cmd_check,
         "clean-logs": cmd_clean_logs,
         "clean-processes": cmd_clean_processes,
@@ -2560,4 +2808,28 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import atexit
+    
+    # 注册退出时的清理函数（作为兜底，防止异常退出时进程泄漏）
+    def _atexit_cleanup():
+        """程序退出时的清理函数（兜底）"""
+        try:
+            from secretary.agents import list_workers
+            workers = list_workers()
+            for worker in workers:
+                pid = worker.get("pid")
+                if pid and _check_process_exists(pid):
+                    # 静默停止，避免在退出时输出过多信息
+                    _stop_process(pid, worker.get("name", "unknown"), verbose=False)
+        except Exception:
+            pass  # 退出时忽略错误
+    
+    atexit.register(_atexit_cleanup)
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Ctrl+C 退出时也清理进程
+        print("\n👋 退出")
+        _cleanup_all_processes()
+        sys.exit(0)

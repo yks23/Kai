@@ -1,30 +1,22 @@
 """
-任务扫描器 — 后台主循环 (支持多实例并行 + 命名工人)。
-使用 agent_loop.run_loop 统一循环。
+统一的任务扫描器 — 所有 agent 使用相同的循环逻辑
+
+所有 agent 都：
+- 放在 agents/<name> 下
+- 包含 tasks/, ongoing/, reports/ 等文件夹
+- 使用相同的触发规则：tasks/ 下有文件
+- 使用相同的循环逻辑，通过配置区分终止条件和提示词
 
 执行范围: 仅 execution_scope 为 task / hire / recycle 的任务会被执行；
   monitor 等其它类型不进入执行流程（见 config.EXECUTABLE_TASK_TYPES）。
   任务文件可通过 <!-- execution_scope: monitor --> 等标注类型，未标注时视为 task。
 
-并发模型:
-  每个 worker 有独立的目录 (workers/{name}/tasks 和 workers/{name}/ongoing)，
-  因此不需要锁机制。每个 worker 的 scanner 只处理自己目录中的任务。
-
-命名工人:
-  `kai hire alice` 招募名为 alice 的工人。每个工人有专属目录:
-    {BASE_DIR}/workers/alice/tasks/    — 秘书分配给 alice 的任务
-    {BASE_DIR}/workers/alice/ongoing/  — alice 正在执行的任务
-  报告统一写入 {BASE_DIR}/report/。
-  未命名的 `kai hire` 使用默认 worker (sen)。
-
 工作流程:
-1. 持续扫描 tasks/ 和 ongoing/ 文件夹 (工人各扫各的目录)
-2. 每轮处理一个任务
-3. 首轮调用 Worker Agent（完整提示词，新会话）
-4. Agent 自然停止后，检查 ongoing/ 中的文件是否还在
-5. 文件还在 → 用 --continue 续轮调用（Agent 保持上下文记忆）
-6. 文件被 Agent 删除 → 任务完成
-7. Scanner 在 stats/ 中写入调用统计
+1. 持续扫描 tasks/ 文件夹（统一触发规则）
+2. 如果有文件，根据配置移动到 ongoing/（如果需要）或直接处理
+3. 根据配置的终止条件和提示词调用 Agent
+4. 根据终止条件判断是否继续（单次执行 vs 直到文件删除）
+5. 完成后写入统计
 """
 import json
 import os
@@ -35,15 +27,15 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Literal
 
 import re
 
 import secretary.config as cfg
 from secretary.config import EXECUTABLE_TASK_TYPES
+from secretary.agent_config import AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig, build_worker_config, build_boss_config, build_recycler_config
 from secretary.worker import run_worker_first_round, run_worker_continue, run_worker_refine
 from secretary.agent_runner import RoundStats
-from secretary.agent_loop import run_loop
+from secretary.agent_loop import run_loop, load_prompt
 from secretary.secretary_agent import run_secretary
 
 # 确保输出实时刷新（用于后台运行时日志及时写入）
@@ -57,53 +49,6 @@ def print(*args, **kwargs):
 
 # 当前 scanner 进程 ID
 _PID = os.getpid()
-
-
-# ============================================================
-#  Scanner 角色 (统一 kai / worker 等)
-# ============================================================
-
-@dataclass
-class ScannerRole:
-    """
-    扫描器角色配置：同一套循环逻辑，通过 role 区分目录与执行方式。
-    - kai: tasks_dir + output_dir (assigned), no ongoing, runner=secretary (单次 run_secretary)
-    - worker: tasks_dir + ongoing_dir, runner=worker (多轮 process_ongoing_task)
-    """
-    name: str
-    tasks_dir: Path
-    ongoing_dir: Path | None  # None = kai 风格，不经过 ongoing
-    output_dir: Path | None   # kai = assigned；worker = None（完成即删除 ongoing 内文件）
-    runner: Literal["secretary", "worker"]
-    log_file: Path | None = None  # kai 的 scanner 日志
-    label: str = ""              # 控制台前缀，如 "🤖 kai" / "👷 sen"
-
-
-def build_kai_role() -> ScannerRole:
-    """Kai（秘书）角色：tasks → assigned，单次 run_secretary。"""
-    return ScannerRole(
-        name="kai",
-        tasks_dir=cfg.KAI_TASKS_DIR,
-        ongoing_dir=None,
-        output_dir=cfg.KAI_ASSIGNED_DIR,
-        runner="secretary",
-        log_file=cfg.KAI_SCANNER_LOG,
-        label="🤖 kai",
-    )
-
-
-def build_worker_role(worker_name: str) -> ScannerRole:
-    """Worker 角色：tasks + ongoing，多轮 process_ongoing_task。"""
-    name = worker_name or cfg.DEFAULT_WORKER_NAME
-    return ScannerRole(
-        name=name,
-        tasks_dir=cfg.WORKERS_DIR / name / "tasks",
-        ongoing_dir=cfg.WORKERS_DIR / name / "ongoing",
-        output_dir=None,
-        runner="worker",
-        log_file=None,
-        label=f"👷 {name}",
-    )
 
 
 # ============================================================
@@ -210,16 +155,14 @@ class TaskStats:
 #  统计报告
 # ============================================================
 
-def _write_scanner_report(task_stats: TaskStats):
+def _write_scanner_report(task_stats: TaskStats, stats_dir: Path):
     """
-    将 scanner 的调用统计写入 worker 的 stats/ 文件夹
+    将 scanner 的调用统计写入 stats/ 文件夹
 
     生成两个文件:
       - {task_name}-stats.md  — 可读的 Markdown 统计报告
       - {task_name}-stats.json — 结构化数据 (数字统计 + 完整对话日志)
     """
-    # 统计统一写入 kai/stats（与 REPORT_DIR 同属 kai 目录，便于 recycler 读取）
-    stats_dir = cfg.STATS_DIR
     stats_dir.mkdir(parents=True, exist_ok=True)
     
     # ---- Markdown 统计报告 ----
@@ -390,15 +333,14 @@ def _parse_min_time(task_file: Path) -> int:
 #  单任务处理
 # ============================================================
 
-def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
+def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: AgentConfig | None = None):
     """
-    持续调用 Worker Agent 直到它删除 ongoing/ 中的任务文件
+    持续调用 Agent 直到它删除 ongoing/ 中的任务文件（或根据终止条件）
+    
+    使用配置中的提示词模板，支持统一的终止条件判断
     
     注意：verbose=True 时，所有输出（包括 agent 的对话过程）都会实时输出到 stdout/stderr
     在后台运行时，这些输出会被重定向到日志文件，并实时刷新。
-    """
-    """
-    持续调用 Worker Agent 直到它删除 ongoing/ 中的任务文件
 
     第1轮: 全新会话 (完整提示词)
     第2轮+: --resume 续轮 (使用 session_id 精确恢复会话，Agent 有上一轮的完整记忆)
@@ -419,11 +361,24 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
     task_stats = TaskStats(task_name=task_name, min_time=min_time)
     task_stats.mark_start()
 
+    # 使用配置的标签，如果没有配置则使用默认
+    label = config.label if config else f"👷 {task_name}"
+    
+    # 开始处理任务信息直接输出
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*60}")
-    print(f"⚙️  开始处理任务: {ongoing_file.name}  (Worker PID={_PID})")
+    print(f"[{ts}] ⚙️ 开始处理任务: {ongoing_file.name} (PID={_PID})")
+    print(f"{'='*60}")
+    print(f"   任务文件: {ongoing_file}")
+    if ongoing_file.exists():
+        file_size = ongoing_file.stat().st_size
+        print(f"   文件大小: {file_size} 字节")
     if min_time > 0:
         print(f"   ⏱️ 最低执行时间: {min_time}s")
-    print(f"{'='*60}")
+    if config:
+        print(f"   Agent: {config.name} ({config.label})")
+    
+    # 任务开始信息已写入日志，这里不再打印（后台运行时会被丢弃）
 
     task_deleted = False  # Agent 是否已经删除了任务文件
 
@@ -447,24 +402,33 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
                 if elapsed >= min_time:
                     break
                 remaining = min_time - elapsed
-                print(f"\n--- 第 {round_num} 轮: 完善阶段 (--resume)"
-                      f" | 已用 {elapsed:.0f}s / {min_time}s, 还需 {remaining:.0f}s ---")
+                # 完善阶段信息已写入日志，这里不再打印
+                report_dir = config.reports_dir if config else None
                 result = run_worker_refine(
+                    agent_name=config.name,
+                    report_dir=config.reports_dir,
                     elapsed_sec=elapsed,
                     min_time=min_time,
                     verbose=verbose,
                     timeout_sec=round_timeout,
                     session_id=task_stats.session_id,  # 使用保存的 session_id
+                    report_dir=report_dir,
                 )
             elif round_num == 1:
-                print(f"\n--- 第 1 轮: 首轮调用 (新会话) ---")
+                # 首轮调用信息已写入日志，这里不再打印
+                report_dir = config.reports_dir if config else None
                 result = run_worker_first_round(ongoing_file, verbose=verbose,
-                                                timeout_sec=round_timeout)
+                                                timeout_sec=round_timeout,
+                                                report_dir=report_dir,
+                                                agent_name=config.name if config else None)
             else:
-                print(f"\n--- 第 {round_num} 轮: 续轮调用 (--resume {task_stats.session_id[:8] if task_stats.session_id else 'N/A'}...) ---")
+                # 续轮调用信息已写入日志，这里不再打印
+                report_dir = config.reports_dir if config else None
                 result = run_worker_continue(ongoing_file, verbose=verbose,
-                                             timeout_sec=round_timeout,
-                                             session_id=task_stats.session_id)  # 使用保存的 session_id
+                    agent_name=config.name if config else None,
+                    report_dir=config.reports_dir if config else None,
+                    timeout_sec=round_timeout,
+                    session_id=task_stats.session_id)  # 使用保存的 session_id
 
             # 记录本轮统计 + 对话日志
             task_stats.add_round(
@@ -472,17 +436,37 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
                 raw_output=result.raw_output,
                 readable_output=result.output,
             )
+            
+            # 记录本轮信息直接输出
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if task_deleted:
+                elapsed = time.time() - task_stats._wall_start
+                remaining = min_time - elapsed if min_time > 0 else 0
+                print(f"\n[{ts}] 🔄 第 {round_num} 轮: 完善阶段 (--resume)")
+                print(f"   已用 {elapsed:.0f}s / {min_time}s, 还需 {remaining:.0f}s")
+            elif round_num == 1:
+                print(f"\n[{ts}] 🚀 第 1 轮: 首轮调用 (新会话)")
+            else:
+                print(f"\n[{ts}] 🔄 第 {round_num} 轮: 续轮调用 (--resume {task_stats.session_id[:8] if task_stats.session_id else 'N/A'}...)")
+            
+            if not result.success:
+                print(f"   ⚠️ Agent 本轮出错 (code={result.return_code})")
+                print(f"   错误信息: {result.output[:200]}")
 
             # 检查: Agent 是否已经删除了任务文件
             if not task_deleted and not ongoing_file.exists():
                 task_deleted = True
                 elapsed = time.time() - task_stats._wall_start
 
+                # 记录任务文件删除直接输出
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"\n[{ts}] ✅ 任务文件已删除 (Agent认为完成)")
                 if min_time > 0 and elapsed < min_time:
                     remaining = min_time - elapsed
-                    print(f"\n📋 任务文件已删除 (Agent认为完成)，但最低时间未到"
-                          f" ({elapsed:.0f}s / {min_time}s)")
-                    print(f"   ⏱️ 进入完善阶段，还需 {remaining:.0f}s ...")
+                    print(f"   ⏱️ 但最低时间未到 ({elapsed:.0f}s / {min_time}s)，进入完善阶段，还需 {remaining:.0f}s")
+
+                if min_time > 0 and elapsed < min_time:
+                    remaining = min_time - elapsed
                     time.sleep(cfg.WORKER_RETRY_INTERVAL)
                     continue
                 else:
@@ -497,14 +481,15 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
                 continue
 
             # Agent 自然停止了但文件还在 → 还没完成，必须进入下一轮
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            elapsed = time.time() - task_stats._wall_start
             if result.success:
-                print(f"   Agent 本轮正常结束，但任务文件仍存在 → 任务未完成")
+                print(f"\n[{ts}] ℹ️ Agent 本轮正常结束，但任务文件仍存在 → 任务未完成")
             else:
-                print(f"   ⚠️ Agent 本轮出错 (code={result.return_code})")
+                print(f"\n[{ts}] ⚠️ Agent 本轮出错 (code={result.return_code})")
                 print(f"   错误信息: {result.output[:200]}")
             if min_time > 0:
                 print(f"   ⏱️ 最低执行时间未到 ({elapsed:.0f}s / {min_time}s)，将续轮直至时间用尽或任务完成")
-
             print(f"   {cfg.WORKER_RETRY_INTERVAL}s 后用 --resume 续轮...")
             time.sleep(cfg.WORKER_RETRY_INTERVAL)
 
@@ -512,7 +497,9 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
         task_stats.success = True
         task_stats.mark_end()
 
-        print(f"\n✅ 任务完成: {task_name}  (Worker PID={_PID})")
+        # 任务完成信息直接输出
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] ✅ 任务完成: {task_name} (PID={_PID})")
         print(f"   共执行 {round_num} 轮"
               f" | 墙钟用时 {task_stats.wall_clock_sec:.1f}s"
               f" | Agent用时 {task_stats.total_duration_sec:.1f}s"
@@ -520,148 +507,468 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True):
               f" | 涉及 {len(task_stats.all_files_changed)} 个文件")
         if min_time > 0:
             print(f"   ⏱️ 最低执行时间: {min_time}s (实际: {task_stats.wall_clock_sec:.1f}s)")
-        _print_report(task_name)
-        _write_scanner_report(task_stats)
+        _print_report(task_name, config)
+        # 使用配置的stats_dir，如果没有配置则使用默认
+        stats_dir = config.stats_dir if config else None
+        _write_scanner_report(task_stats, stats_dir)
+        
+        # 注意：memory的更新由agent自己决定，不在这里自动更新
 
     except Exception as e:
         # 即使异常退出，也保存已有的统计数据
         task_stats.mark_end()
-        print(f"\n⚠️ 任务 {task_name} 异常退出: {e}")
-        print(f"   保存已有统计数据...")
-        _write_scanner_report(task_stats)
+        
+        # 异常信息直接输出
+        stats_dir = config.stats_dir if config else None
+        _write_scanner_report(task_stats, stats_dir)
         raise
 
 
-def _print_report(task_name: str):
-    """打印 Worker 报告文件路径"""
-    expected = cfg.REPORT_DIR / f"{task_name}-report.md"
+def _print_report(task_name: str, config: AgentConfig | None = None):
+    """打印报告文件路径"""
+    report_dir = config.reports_dir if config else None
+    expected = report_dir / f"{task_name}-report.md"
     if expected.exists():
-        print(f"   📄 Worker报告: {expected}")
+        print(f"   📄 报告: {expected}")
     else:
         reports = sorted(
-            [r for r in cfg.REPORT_DIR.glob("*.md") if r.stem.endswith("-report")],
+            [r for r in report_dir.glob("*.md") if r.stem.endswith("-report")],
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
         if reports:
-            print(f"   📄 最新Worker报告: {reports[0]}")
+            print(f"   📄 最新报告: {reports[0]}")
 
 
 # ============================================================
-#  统一扫描器：trigger + process 按 role 分发
+#  统一扫描器：统一的触发规则和处理逻辑
 # ============================================================
 
-def _unified_trigger(role: ScannerRole) -> list[Path]:
+def _get_trigger_debug_info(config: AgentConfig) -> str:
     """
-    统一触发逻辑：有 ongoing 则优先 ongoing 再 tasks→ongoing；无 ongoing（kai）则只取 tasks 一项。
+    获取触发检查的详细信息（用于debug日志）
+    返回字符串描述为什么触发或没有触发
     """
-    # 有 ongoing_dir 时优先从 ongoing 取一个可执行任务
-    if role.ongoing_dir is not None and role.ongoing_dir.exists():
-        candidates = [
-            f for f in sorted(role.ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
-            if _is_executable_task(f)
-        ]
-        if candidates:
-            return [candidates[0]]
-
-    # 从 tasks_dir 取任务
-    if not role.tasks_dir.exists():
-        return []
-    all_md = list(role.tasks_dir.glob("*.md"))
-    if not all_md:
-        return []
-    # worker：只执行 execution_scope 为 task/hire/recycle 的；kai：不筛选，保持原行为
-    if role.ongoing_dir is not None:
-        executable = [p for p in all_md if _is_executable_task(p)]
-        tasks_list = sorted(executable, key=lambda p: p.stat().st_mtime)
+    trigger = config.trigger
+    info_parts = []
+    
+    # 1. 自定义触发函数
+    if trigger.custom_trigger_fn:
+        try:
+            result = trigger.custom_trigger_fn(config)
+            if result:
+                info_parts.append(f"自定义触发函数返回 {len(result)} 个文件")
+            else:
+                info_parts.append("自定义触发函数返回空（未触发）")
+        except Exception as e:
+            info_parts.append(f"自定义触发函数异常: {e}")
+        return " | ".join(info_parts)
+    
+    # 2. 标准目录监视逻辑
+    if not trigger.watch_dirs:
+        return "无监视目录配置"
+    
+    info_parts.append(f"监视目录: {len(trigger.watch_dirs)} 个")
+    info_parts.append(f"触发条件: {trigger.condition.value}")
+    
+    # 检查每个目录的状态
+    all_satisfied = True
+    for watch_dir in trigger.watch_dirs:
+        if not watch_dir.exists():
+            if trigger.condition == TriggerCondition.HAS_FILES:
+                all_satisfied = False
+                info_parts.append(f"{watch_dir.name}: 目录不存在")
+            else:
+                info_parts.append(f"{watch_dir.name}: 目录不存在（视为空，满足条件）")
+            continue
+        
+        md_files = list(watch_dir.glob("*.md"))
+        file_count = len(md_files)
+        has_files = file_count > 0
+        
+        if trigger.condition == TriggerCondition.HAS_FILES:
+            if has_files:
+                info_parts.append(f"{watch_dir.name}: {file_count} 个文件 ✓")
+            else:
+                all_satisfied = False
+                info_parts.append(f"{watch_dir.name}: 0 个文件 ✗")
+        elif trigger.condition == TriggerCondition.IS_EMPTY:
+            if has_files:
+                all_satisfied = False
+                info_parts.append(f"{watch_dir.name}: {file_count} 个文件（不满足空条件）✗")
+            else:
+                info_parts.append(f"{watch_dir.name}: 空目录 ✓")
+    
+    if all_satisfied:
+        # 条件满足，检查是否有可执行文件
+        if trigger.condition == TriggerCondition.HAS_FILES:
+            if config.use_ongoing and config.ongoing_dir.exists() and config.ongoing_dir in trigger.watch_dirs:
+                ongoing_files = [f for f in config.ongoing_dir.glob("*.md") if _is_executable_task(f)]
+                if ongoing_files:
+                    info_parts.append(f"→ 触发: ongoing目录有 {len(ongoing_files)} 个可执行文件")
+                    return " | ".join(info_parts)
+            
+            if config.tasks_dir in trigger.watch_dirs and config.tasks_dir.exists():
+                all_md = list(config.tasks_dir.glob("*.md"))
+                executable = [p for p in all_md if _is_executable_task(p)]
+                non_executable = [p for p in all_md if not _is_executable_task(p)]
+                
+                # 详细记录文件信息
+                if all_md:
+                    file_details = []
+                    for f in all_md[:5]:  # 最多显示5个文件
+                        scope = _get_task_execution_scope(f)
+                        is_exec = _is_executable_task(f)
+                        file_details.append(f"{f.name}(scope={scope},exec={is_exec})")
+                    if len(all_md) > 5:
+                        file_details.append(f"...共{len(all_md)}个文件")
+                    info_parts.append(f"文件列表: {', '.join(file_details)}")
+                
+                if executable:
+                    info_parts.append(f"→ 触发: tasks目录有 {len(executable)} 个可执行文件")
+                    return " | ".join(info_parts)
+                else:
+                    if non_executable:
+                        non_exec_details = []
+                        for f in non_executable[:3]:
+                            scope = _get_task_execution_scope(f)
+                            non_exec_details.append(f"{f.name}(scope={scope})")
+                        info_parts.append(f"→ 未触发: tasks目录有 {len(all_md)} 个文件但无可执行文件 | 非可执行: {', '.join(non_exec_details)}")
+                    else:
+                        info_parts.append(f"→ 未触发: tasks目录有 {len(all_md)} 个文件但无可执行文件")
+            else:
+                info_parts.append("→ 未触发: 条件满足但未找到可执行文件")
+        else:
+            info_parts.append("→ 触发: 条件满足")
     else:
-        tasks_list = sorted(all_md, key=lambda p: p.stat().st_mtime)
-    if not tasks_list:
+        info_parts.append("→ 未触发: 条件不满足")
+    
+    return " | ".join(info_parts)
+
+
+def _unified_trigger(config: AgentConfig) -> list[Path]:
+    """
+    统一触发规则：根据TriggerConfig配置进行触发
+    
+    支持：
+    1. 自定义触发函数（custom_trigger_fn）
+    2. 标准目录监视（watch_dirs + condition）
+    3. 虚拟触发文件（create_virtual_file）
+    """
+    trigger = config.trigger
+    
+    # 1. 如果提供了自定义触发函数，优先使用
+    if trigger.custom_trigger_fn:
+        return trigger.custom_trigger_fn(config)
+    
+    # 2. 标准目录监视逻辑
+    if not trigger.watch_dirs:
         return []
-    task_file = tasks_list[0]
-    if role.ongoing_dir is not None:
-        dest = _move_task_to_ongoing_dir(task_file, role.ongoing_dir)
-        return [dest] if dest else []
-    return [task_file]
+    
+    # 检查所有监视目录是否满足条件
+    all_satisfied = True
+    for watch_dir in trigger.watch_dirs:
+        if not watch_dir.exists():
+            if trigger.condition == TriggerCondition.HAS_FILES:
+                all_satisfied = False
+                break
+            # IS_EMPTY: 目录不存在视为空，满足条件
+            continue
+        
+        md_files = list(watch_dir.glob("*.md"))
+        has_files = len(md_files) > 0
+        
+        if trigger.condition == TriggerCondition.HAS_FILES:
+            if not has_files:
+                all_satisfied = False
+                break
+        elif trigger.condition == TriggerCondition.IS_EMPTY:
+            if has_files:
+                all_satisfied = False
+                break
+    
+    if not all_satisfied:
+        return []
+    
+    # 3. 条件满足，返回触发文件
+    if trigger.condition == TriggerCondition.HAS_FILES:
+        # 有文件时触发：返回文件列表
+        # 优先处理ongoing目录（如果存在且use_ongoing=True）
+        if config.use_ongoing and config.ongoing_dir.exists() and config.ongoing_dir in trigger.watch_dirs:
+            candidates = [
+                f for f in sorted(config.ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
+                if _is_executable_task(f)
+            ]
+            if candidates:
+                return [candidates[0]]
+        
+        # 从tasks目录取文件
+        if config.tasks_dir in trigger.watch_dirs and config.tasks_dir.exists():
+            all_md = list(config.tasks_dir.glob("*.md"))
+            executable = [p for p in all_md if _is_executable_task(p)]
+            
+            # 文件检查详情直接输出（用于debug）
+            if all_md:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"\n[{ts}] 📋 文件检查详情:")
+                for f in all_md[:5]:  # 最多显示5个
+                    scope = _get_task_execution_scope(f)
+                    is_exec = _is_executable_task(f)
+                    print(f"   - {f.name}: scope={scope}, executable={is_exec}")
+                print(f"   可执行文件数: {len(executable)}/{len(all_md)}")
+            
+            if executable:
+                # 按修改时间排序，返回最早的文件
+                return [sorted(executable, key=lambda p: p.stat().st_mtime)[0]]
+        
+        # 从其他监视目录取文件
+        result = []
+        for watch_dir in trigger.watch_dirs:
+            if watch_dir == config.tasks_dir or watch_dir == config.ongoing_dir:
+                continue
+            if watch_dir.exists():
+                all_md = list(watch_dir.glob("*.md"))
+                executable = [p for p in all_md if _is_executable_task(p)]
+                if executable:
+                    result.extend(executable)
+        if result:
+            return [sorted(result, key=lambda p: p.stat().st_mtime)[0]]
+        
+        return []
+    
+    elif trigger.condition == TriggerCondition.IS_EMPTY:
+        # 为空时触发：创建虚拟触发文件（如果需要）
+        if trigger.create_virtual_file:
+            trigger_file = config.base_dir / trigger.virtual_file_name
+            if not trigger_file.exists():
+                trigger_file.touch()
+            return [trigger_file]
+        return []
+    
 
 
-def _process_one_unified(role: ScannerRole, file_path: Path, verbose: bool) -> None:
+def _process_one_unified(config: AgentConfig, file_path: Path, verbose: bool) -> None:
     """
-    统一处理分发：secretary = 移到 output_dir + run_secretary 一次；worker = process_ongoing_task。
+    统一处理逻辑：根据配置的终止条件和提示词处理任务
     """
-    if role.runner == "secretary":
-        if role.output_dir is None or role.log_file is None:
-            print(f"⚠️ [{role.label} PID={_PID}] secretary 角色缺少 output_dir 或 log_file")
-            return
-        _process_one_kai_task(
-            file_path, role.output_dir, role.log_file, role.label, verbose
-        )
-    elif role.runner == "worker":
-        process_ongoing_task(file_path, verbose=verbose)
+    if config.termination == TerminationCondition.SINGLE_RUN:
+        # 单次执行（如 kai、boss 或 recycler）
+        # 检查类型（通过提示词模板判断）
+        if config.first_round_prompt == "boss.md":
+            _process_boss(config, file_path, verbose)
+        elif config.first_round_prompt == "recycler.md":
+            _process_recycler(config, file_path, verbose)
+        else:
+            _process_single_run(config, file_path, verbose)
+    elif config.termination == TerminationCondition.UNTIL_FILE_DELETED:
+        # 直到文件删除（如 worker）
+        _process_until_deleted(config, file_path, verbose)
     else:
-        print(f"⚠️ [{role.label} PID={_PID}] 未知 runner: {role.runner}")
+        print(f"⚠️ [{config.label} PID={_PID}] 未知终止条件: {config.termination}")
 
 
-def run_unified_scanner(role: ScannerRole, once: bool = False, verbose: bool = True) -> None:
+def _process_single_run(config: AgentConfig, file_path: Path, verbose: bool) -> None:
+    """处理单次执行的任务（如 kai）"""
+    if config.output_dir is None or config.log_file is None:
+        print(f"⚠️ [{config.label} PID={_PID}] 缺少 output_dir 或 log_file")
+        return
+    
+    try:
+        request = file_path.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] ❌ 读取任务文件失败: {file_path.name} | 错误: {e}")
+        traceback.print_exc()
+        if file_path.exists():
+            error_file = config.output_dir / f"error-{file_path.name}"
+            shutil.move(str(file_path), str(error_file))
+        return
+
+    assigned_file = config.output_dir / file_path.name
+    try:
+        shutil.move(str(file_path), str(assigned_file))
+    except Exception as e:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] ❌ 移动任务文件失败: {file_path.name} | 错误: {e}")
+        traceback.print_exc()
+        return
+
+    # 直接运行，输出会自动重定向到日志文件
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print("\n" + "=" * 60)
+    print(f"[{ts}] 处理任务: {file_path.name}")
+    print("=" * 60 + "\n")
+    try:
+        secretary_name = config.name
+        run_secretary(request, verbose=True, secretary_name=secretary_name)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print("\n" + "=" * 60)
+        print(f"[{ts}] 任务完成: {file_path.name}")
+        print("=" * 60 + "\n")
+    except Exception as e:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] ⚠️ 处理任务时发生错误: {e}")
+        traceback.print_exc()
+        raise
+
+
+def _process_until_deleted(config: AgentConfig, ongoing_file: Path, verbose: bool) -> None:
+    """处理直到文件删除的任务（如 worker）"""
+    process_ongoing_task(ongoing_file, verbose=verbose, config=config)
+
+
+def _process_boss(config: AgentConfig, file_path: Path, verbose: bool) -> None:
+    """处理Boss任务：调用boss.py的run_boss"""
+    from secretary.boss import run_boss
+    # Boss使用虚拟触发文件，不需要实际的任务文件
+    # 创建一个临时任务文件用于传递上下文
+    if file_path.name == ".boss_trigger":
+        # 使用虚拟文件，boss会忽略它
+        run_boss(file_path, config.base_dir, verbose=verbose)
+        # 删除触发文件
+        if file_path.exists():
+            file_path.unlink()
+    else:
+        # 如果是真实任务文件，正常处理
+        run_boss(file_path, config.base_dir, verbose=verbose)
+
+
+def _process_recycler(config: AgentConfig, file_path: Path, verbose: bool) -> None:
+    """处理Recycler任务：调用recycler.py的process_report"""
+    from secretary.recycler import process_report
+    process_report(file_path, recycler_config=config, verbose=verbose)
+
+
+def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool = True) -> None:
     """
-    统一扫描循环：按 role 的 tasks_dir / ongoing_dir / output_dir 与 runner 类型，
-    使用同一套 trigger + process，可变部分由装载的提示词与 runner（secretary / worker）体现。
+    统一扫描循环：所有 agent 使用相同的循环逻辑
+    通过配置区分终止条件和提示词
     """
-    tasks_dir = role.tasks_dir
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    if role.ongoing_dir is not None:
-        role.ongoing_dir.mkdir(parents=True, exist_ok=True)
-    if role.output_dir is not None:
-        role.output_dir.mkdir(parents=True, exist_ok=True)
-    if role.runner == "secretary" and role.log_file is not None:
-        role.log_file.parent.mkdir(parents=True, exist_ok=True)
+    # 确保目录存在
+    config.tasks_dir.mkdir(parents=True, exist_ok=True)
+    if config.use_ongoing:
+        config.ongoing_dir.mkdir(parents=True, exist_ok=True)
+    if config.output_dir is not None:
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+    if config.log_file is not None:
+        config.log_file.parent.mkdir(parents=True, exist_ok=True)
+    if config.reports_dir is not None:
+        config.reports_dir.mkdir(parents=True, exist_ok=True)
+    config.stats_dir.mkdir(parents=True, exist_ok=True)
+    config.logs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Recycler需要额外的solved和unsolved目录
+    if config.first_round_prompt == "recycler.md":
+        recycler_dir = config.base_dir
+        (recycler_dir / "solved").mkdir(parents=True, exist_ok=True)
+        (recycler_dir / "unsolved").mkdir(parents=True, exist_ok=True)
 
-    if role.runner == "worker":
-        from secretary.agents import register_worker, update_worker_status, record_task_completion
-        register_worker(role.name, description="通用工人" if role.name == cfg.DEFAULT_WORKER_NAME else "")
-        update_worker_status(role.name, "busy", pid=_PID)
+    # 如果是 worker，注册并更新状态
+    if config.termination == TerminationCondition.UNTIL_FILE_DELETED:
+        from secretary.agents import register_worker, update_worker_status
+        register_worker(config.name, description="通用工人" if config.name == cfg.DEFAULT_WORKER_NAME else "")
+        update_worker_status(config.name, "busy", pid=_PID)
 
-    label = role.label
-    print("=" * 60)
-    print(f"{label} 启动  (PID={_PID})")
-    print(f"   任务目录: {tasks_dir}")
-    if role.ongoing_dir is not None:
-        print(f"   执行目录: {role.ongoing_dir}")
-    if role.output_dir is not None:
-        print(f"   已分配目录: {role.output_dir}")
-    if role.log_file is not None:
-        print(f"   日志文件: {role.log_file}")
-    if role.runner == "worker":
-        print(f"   报告目录: {cfg.REPORT_DIR}")
-        print(f"   统计目录: {cfg.STATS_DIR}")
+    label = config.label
+    # 启动信息直接输出（会被重定向到日志文件）
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print("\n" + "=" * 60)
+    print(f"[{ts}] {label} 启动 (PID={_PID})")
+    print(f"   任务目录: {config.tasks_dir}")
+    if config.use_ongoing:
+        print(f"   执行目录: {config.ongoing_dir}")
+    if config.output_dir is not None:
+        print(f"   输出目录: {config.output_dir}")
+    if config.reports_dir:
+        print(f"   报告目录: {config.reports_dir}")
+    print(f"   统计目录: {config.stats_dir}")
     print(f"   扫描间隔: {cfg.SCAN_INTERVAL}s")
     print(f"   模式: {'单次' if once else '持续运行（循环直到 Ctrl+C）'}")
-    if role.runner == "worker" and role.name != cfg.DEFAULT_WORKER_NAME:
-        print(f"   工人名: {role.name}")
-    elif role.runner == "worker":
-        print(f"   💡 可启动多个 `kai hire` 或 `kai hire <name>` 并行处理任务")
-    print("=" * 60)
+    print(f"   终止条件: {config.termination.value}")
+    print("=" * 60 + "\n")
 
     def trigger_fn():
-        return _unified_trigger(role)
+        try:
+            result = _unified_trigger(config)
+        except Exception as e:
+            # 触发检查时的异常直接输出
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{ts}] ❌ 触发检查异常: {e}")
+            traceback.print_exc()
+            # 返回空列表，避免崩溃
+            result = []
+        
+        # 每30秒记录一次触发检查状态（用于debug）
+        import time
+        current_time = time.time()
+        if not hasattr(trigger_fn, '_last_log_time'):
+            trigger_fn._last_log_time = 0
+        
+        should_log = False
+        if result:
+            should_log = True
+        elif current_time - trigger_fn._last_log_time >= 30:
+            should_log = True
+            trigger_fn._last_log_time = current_time
+        
+        if should_log:
+            trigger_info = _get_trigger_debug_info(config)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if result:
+                print(f"\n[{ts}] 🔔 触发: {len(result)} 个文件 | {trigger_info}")
+            else:
+                print(f"\n[{ts}] 🔍 未触发: {trigger_info}")
+            if result:
+                trigger_fn._last_log_time = current_time
+        
+        return result
 
     def process_fn(file_path: Path):
-        if role.runner == "worker":
-            print(f"\n📋 [{label} PID={_PID}] 处理任务: {file_path.name}")
-        _process_one_unified(role, file_path, verbose)
-        if role.runner == "worker":
-            from secretary.agents import record_task_completion
-            record_task_completion(role.name, file_path.stem)
+        # 触发处理信息直接输出
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] 🔔 触发处理: {file_path.name}")
+        print(f"   文件路径: {file_path}")
+        print(f"   文件存在: {file_path.exists()}")
+        if file_path.exists():
+            file_size = file_path.stat().st_size
+            scope = _get_task_execution_scope(file_path)
+            is_exec = _is_executable_task(file_path)
+            print(f"   文件大小: {file_size} 字节")
+            print(f"   execution_scope: {scope}, executable: {is_exec}")
+        print(f"   终止条件: {config.termination.value}")
+        
+        try:
+            _process_one_unified(config, file_path, verbose)
+            if config.termination == TerminationCondition.UNTIL_FILE_DELETED:
+                from secretary.agents import record_task_completion
+                record_task_completion(config.name, file_path.stem)
+        except Exception as e:
+            # 异常信息直接输出
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{ts}] ❌ 处理任务异常: {file_path.name} | 错误: {e}")
+            print(f"   异常类型: {type(e).__name__}")
+            print(f"   文件路径: {file_path}")
+            print(f"   完整异常信息:")
+            traceback.print_exc()
+            raise
 
     def on_idle():
-        if verbose:
-            ts = datetime.now().strftime("%H:%M:%S")
-            print(f"💤 [{label} PID={_PID}] [{ts}] 没有新任务，{cfg.SCAN_INTERVAL}s 后再扫描...")
+        # 空闲状态每30秒记录一次
+        import time
+        current_time = time.time()
+        if not hasattr(on_idle, '_last_log_time'):
+            on_idle._last_log_time = 0
+        
+        if current_time - on_idle._last_log_time >= 30:
+            on_idle._last_log_time = current_time
+            trigger_info = _get_trigger_debug_info(config)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{ts}] 🔍 触发检查: {trigger_info}")
 
     def on_exit():
-        if role.runner == "worker":
+        if config.termination == TerminationCondition.UNTIL_FILE_DELETED:
             try:
                 from secretary.agents import update_worker_status
-                update_worker_status(role.name, "idle", pid=None)
+                update_worker_status(config.name, "idle", pid=None)
             except Exception:
                 pass
 
@@ -674,98 +981,69 @@ def run_unified_scanner(role: ScannerRole, once: bool = False, verbose: bool = T
         verbose=verbose,
         on_idle=on_idle,
         on_exit=on_exit,
+        log_file=str(config.log_file) if config.log_file else None,
     )
 
 
 # ============================================================
-#  Kai 扫描器（秘书任务队列：tasks → assigned → run_secretary）
+#  入口函数：使用统一的配置系统
 # ============================================================
 
-def _process_one_kai_task(
-    task_file: Path,
-    assigned_dir: Path,
-    log_file: Path,
-    label: str,
-    verbose: bool,
-) -> None:
-    """处理 kai 任务队列中的单文件：读内容、移到 assigned、重定向输出并调用 run_secretary。"""
-    try:
-        request = task_file.read_text(encoding="utf-8").strip()
-    except Exception as e:
-        print(f"⚠️ [{label} PID={_PID}] 读取任务文件失败: {e}", file=sys.stderr)
-        if task_file.exists():
-            error_file = assigned_dir / f"error-{task_file.name}"
-            shutil.move(str(task_file), str(error_file))
-        return
+def run_kai_scanner(once: bool = False, verbose: bool = False, secretary_name: str = "kai") -> None:
+    """运行 Secretary 任务扫描器：扫描 agents/<name>/tasks/，每项调用 run_secretary，输出写入 <name>/logs。"""
+    # 使用通用的 secretary 配置（与 kai 相同，但支持任意名称）
+    secretary_dir = cfg.BASE_DIR / "agents" / secretary_name
+    config = AgentConfig(
+        name=secretary_name,
+        base_dir=secretary_dir,
+        tasks_dir=secretary_dir / "tasks",
+        ongoing_dir=secretary_dir / "ongoing",  # secretary不使用ongoing，但保留目录结构
+        reports_dir=None,  # secretary不需要reports目录（它不产生报告，只分配任务）
+        logs_dir=secretary_dir / "logs",
+        stats_dir=secretary_dir / "stats",
+        trigger=TriggerConfig(
+            watch_dirs=[secretary_dir / "tasks"],
+            condition=TriggerCondition.HAS_FILES,
+        ),
+        termination=TerminationCondition.SINGLE_RUN,
+        first_round_prompt="secretary.md",
+        use_ongoing=False,  # secretary不使用ongoing
+        output_dir=secretary_dir / "assigned",  # secretary使用assigned目录
+        log_file=secretary_dir / "logs" / "scanner.log",
+        label=f"🤖 {secretary_name}",
+    )
+    run_unified_scanner(config, once=once, verbose=verbose)
 
-    assigned_file = assigned_dir / task_file.name
-    try:
-        shutil.move(str(task_file), str(assigned_file))
-    except Exception as e:
-        print(f"⚠️ [{label} PID={_PID}] 移动任务文件失败: {e}", file=sys.stderr)
-        return
-
-    class FlushFile:
-        def __init__(self, file):
-            self.file = file
-        def write(self, s):
-            self.file.write(s)
-            self.file.flush()
-        def flush(self):
-            self.file.flush()
-        def __getattr__(self, name):
-            return getattr(self.file, name)
-
-    try:
-        with open(log_file, "a", encoding="utf-8", buffering=1) as log_f:
-            flush_log = FlushFile(log_f)
-            orig_stdout, orig_stderr = sys.stdout, sys.stderr
-            try:
-                sys.stdout = sys.stderr = flush_log
-                log_f.write("\n" + "=" * 60 + "\n")
-                log_f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 处理任务: {task_file.name}\n")
-                log_f.write("=" * 60 + "\n\n")
-                log_f.flush()
-                run_secretary(request, verbose=True)
-                log_f.write("\n" + "=" * 60 + "\n")
-                log_f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 任务完成: {task_file.name}\n")
-                log_f.write("=" * 60 + "\n\n")
-                log_f.flush()
-            finally:
-                sys.stdout, sys.stderr = orig_stdout, orig_stderr
-        if verbose:
-            ts = datetime.now().strftime("%H:%M:%S")
-            print(f"✅ [{label} PID={_PID}] [{ts}] 任务处理完成: {task_file.name}")
-            print(f"   日志已写入: {log_file}")
-    except Exception as e:
-        try:
-            with open(log_file, "a", encoding="utf-8") as log_f:
-                log_f.write(f"\n⚠️ 处理任务时发生错误: {e}\n")
-                traceback.print_exc(file=log_f)
-        except Exception:
-            pass
-        print(f"⚠️ [{label} PID={_PID}] 处理任务时发生错误: {e}", file=sys.stderr)
-        if verbose:
-            traceback.print_exc(file=sys.stderr)
-
-
-def run_kai_scanner(once: bool = False, verbose: bool = False) -> None:
-    """运行 Kai（秘书）任务扫描器：扫描 agents/kai/tasks/，每项调用 run_secretary，输出写入 kai/logs。"""
-    role = build_kai_role()
-    run_unified_scanner(role, once=once, verbose=verbose)
-
-
-# ============================================================
-#  Worker 扫描器（tasks/ongoing → process_ongoing_task）
-# ============================================================
 
 def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | None = None) -> None:
     """
-    运行主扫描循环（使用 agent_loop.run_loop）。
+    运行 Worker 扫描循环（使用统一的循环逻辑）。
     每轮最多处理一项：优先 ongoing/，否则从 tasks/ 拉新任务。
     """
-    role = build_worker_role(worker_name or cfg.DEFAULT_WORKER_NAME)
-    run_unified_scanner(role, once=once, verbose=verbose)
+    config = build_worker_config(cfg.BASE_DIR, worker_name or cfg.DEFAULT_WORKER_NAME)
+    run_unified_scanner(config, once=once, verbose=verbose)
+
+
+def run_boss_scanner(once: bool = False, verbose: bool = True, boss_name: str | None = None) -> None:
+    """
+    运行 Boss 扫描循环（使用统一的循环逻辑）。
+    Boss监控指定worker的队列，在队列为空时生成新任务。
+    """
+    if not boss_name:
+        raise ValueError("Boss名称不能为空")
+    config = build_boss_config(cfg.BASE_DIR, boss_name)
+    run_unified_scanner(config, once=once, verbose=verbose)
+
+
+def run_recycler_scanner(once: bool = False, verbose: bool = True, recycler_name: str | None = None) -> None:
+    """
+    运行 Recycler 扫描循环（使用统一的循环逻辑）。
+    Recycler扫描所有agent的reports目录，审查完成报告。
+    """
+    if not recycler_name:
+        recycler_name = "recycler"
+    config = build_recycler_config(cfg.BASE_DIR, recycler_name)
+    run_unified_scanner(config, once=once, verbose=verbose)
 
 
 if __name__ == "__main__":
@@ -774,5 +1052,12 @@ if __name__ == "__main__":
     parser.add_argument("--once", action="store_true", help="只执行一次")
     parser.add_argument("--quiet", action="store_true", help="安静模式")
     parser.add_argument("--worker", type=str, default=None, help="worker 名称")
+    parser.add_argument("--boss", type=str, default=None, help="boss 名称")
+    parser.add_argument("--recycler", type=str, default=None, help="recycler 名称")
     args = parser.parse_args()
-    run_scanner(once=args.once, verbose=not args.quiet, worker_name=args.worker)
+    if args.boss:
+        run_boss_scanner(once=args.once, verbose=not args.quiet, boss_name=args.boss)
+    elif args.recycler:
+        run_recycler_scanner(once=args.once, verbose=not args.quiet, recycler_name=args.recycler)
+    else:
+        run_scanner(once=args.once, verbose=not args.quiet, worker_name=args.worker)

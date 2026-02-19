@@ -30,10 +30,11 @@ from secretary.agent_loop import load_prompt
 from secretary.agent_runner import run_agent
 
 
-def _load_memory() -> str:
+def _load_memory(secretary_name: str) -> str:
     """加载秘书的历史记忆"""
-    if cfg.SECRETARY_MEMORY_FILE.exists():
-        content = cfg.SECRETARY_MEMORY_FILE.read_text(encoding="utf-8")
+    memory_file = cfg.AGENTS_DIR / secretary_name / "memory.md"
+    if memory_file.exists():
+        content = memory_file.read_text(encoding="utf-8")
         lines = content.strip().splitlines()
         if len(lines) > 150:
             header = lines[:2]
@@ -43,11 +44,12 @@ def _load_memory() -> str:
     return ""
 
 
-def get_goals() -> list:
+def get_goals(secretary_name: str) -> list:
     """获取当前全局目标列表（供 CLI 列出）"""
-    if not getattr(cfg, "SECRETARY_GOALS_FILE", None) or not cfg.SECRETARY_GOALS_FILE.exists():
+    goals_file = cfg.AGENTS_DIR / secretary_name / "goals.md"
+    if not goals_file.exists():
         return []
-    text = cfg.SECRETARY_GOALS_FILE.read_text(encoding="utf-8")
+    text = goals_file.read_text(encoding="utf-8")
     goals = []
     for line in text.splitlines():
         line = line.strip()
@@ -59,32 +61,30 @@ def get_goals() -> list:
     return goals
 
 
-def set_goals(goals: list) -> None:
-    """将全局目标持久化到 secretary_goals.md（覆盖）"""
-    path = getattr(cfg, "SECRETARY_GOALS_FILE", None)
-    if not path:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
+def set_goals(goals: list, secretary_name: str) -> None:
+    """将全局目标持久化到 goals.md（覆盖）"""
+    goals_file = cfg.AGENTS_DIR / secretary_name / "goals.md"
+    goals_file.parent.mkdir(parents=True, exist_ok=True)
     if not goals:
-        if path.exists():
-            path.unlink()
+        if goals_file.exists():
+            goals_file.unlink()
         return
     lines = ["# 当前全局目标\n", "以下目标在任务归类与分配时请与之对齐。\n\n"]
     for g in goals:
         g = (g or "").strip()
         if g:
             lines.append(f"- {g}\n")
-    path.write_text("".join(lines), encoding="utf-8")
+    goals_file.write_text("".join(lines), encoding="utf-8")
 
 
-def clear_goals() -> None:
+def clear_goals(secretary_name: str) -> None:
     """清空当前全局目标"""
-    set_goals([])
+    set_goals([], secretary_name)
 
 
-def _load_goals() -> str:
+def _load_goals(secretary_name: str) -> str:
     """加载全局目标文本（供注入到秘书提示词）"""
-    goals = get_goals()
+    goals = get_goals(secretary_name)
     if not goals:
         return ""
     return "\n".join(f"- {g}" for g in goals)
@@ -150,12 +150,14 @@ def _load_existing_tasks_summary() -> str:
     return "\n".join(lines) if lines else ""
 
 
-def _append_memory(user_request: str, agent_output: str):
+def _append_memory(user_request: str, agent_output: str, secretary_name: str):
     """将本次调用的摘要追加到记忆文件"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    memory_file = cfg.AGENTS_DIR / secretary_name / "memory.md"
 
-    if not cfg.SECRETARY_MEMORY_FILE.exists():
-        cfg.SECRETARY_MEMORY_FILE.write_text(
+    if not memory_file.exists():
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        memory_file.write_text(
             "# 秘书Agent 记忆\n\n"
             "记录每次调用的决策历史，帮助后续调用做出更一致的归类和分配判断。\n\n",
             encoding="utf-8",
@@ -173,17 +175,17 @@ def _append_memory(user_request: str, agent_output: str):
         f"\n"
     )
 
-    with open(cfg.SECRETARY_MEMORY_FILE, "a", encoding="utf-8") as f:
+    with open(memory_file, "a", encoding="utf-8") as f:
         f.write(entry)
 
 
-def build_secretary_prompt(user_request: str) -> str:
+def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
     """
     构建给秘书 Agent 的提示词
     包含: 模板 + 记忆 + 工人信息 + 技能 + 现有任务概览 + 用户请求
     """
     # 1. 历史记忆
-    memory = _load_memory()
+    memory = _load_memory(secretary_name)
     memory_section = ""
     if memory:
         memory_section = (
@@ -235,7 +237,7 @@ def build_secretary_prompt(user_request: str) -> str:
         )
 
     # 5. 当前全局目标 (kai target 设定，归类与分配时与之对齐)
-    goals_text = _load_goals()
+    goals_text = _load_goals(secretary_name)
     goals_section = ""
     if goals_text:
         goals_section = (
@@ -247,7 +249,7 @@ def build_secretary_prompt(user_request: str) -> str:
     template = load_prompt("secretary.md")
     # 注意: 不再使用根目录的 tasks_dir，所有任务都分配到 worker 目录
     # 这里保留 tasks_dir 参数用于提示词模板兼容，但实际应该使用 worker 目录
-    default_tasks_dir = cfg.WORKERS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"
+    default_tasks_dir = cfg.AGENTS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"
     return template.format(
         base_dir=cfg.BASE_DIR,
         tasks_dir=str(default_tasks_dir),  # 提示词中显示默认 worker 的目录
@@ -260,16 +262,22 @@ def build_secretary_prompt(user_request: str) -> str:
     )
 
 
-def run_secretary(user_request: str, verbose: bool = True) -> bool:
+def run_secretary(user_request: str, verbose: bool = True, secretary_name: str = "kai") -> bool:
     """
     运行秘书 Agent 处理用户请求
+
+    Args:
+        user_request: 用户请求
+        verbose: 是否显示详细信息
+        secretary_name: secretary agent 名称
 
     Returns:
         是否成功
     """
     if verbose:
-        print(f"📋 秘书 Agent 收到请求: {user_request}")
-        has_memory = cfg.SECRETARY_MEMORY_FILE.exists()
+        print(f"📋 秘书 Agent ({secretary_name}) 收到请求: {user_request}")
+        memory_file = cfg.AGENTS_DIR / secretary_name / "memory.md"
+        has_memory = memory_file.exists()
         print(f"   记忆: {'✅ 已加载历史记忆' if has_memory else '🆕 首次调用，无历史记忆'}")
 
         # 显示工人信息
@@ -295,7 +303,7 @@ def run_secretary(user_request: str, verbose: bool = True) -> bool:
 
         print(f"   正在分析、归类并分配...")
 
-    prompt = build_secretary_prompt(user_request)
+    prompt = build_secretary_prompt(user_request, secretary_name)
 
     # 从设置中获取模型，如果没有设置则使用 Auto
     from secretary.settings import get_model
@@ -309,10 +317,11 @@ def run_secretary(user_request: str, verbose: bool = True) -> bool:
     )
 
     if result.success:
-        _append_memory(user_request, result.output)
+        _append_memory(user_request, result.output, secretary_name)
         if verbose:
+            memory_file = cfg.AGENTS_DIR / secretary_name / "memory.md"
             print(f"\n✅ 秘书 Agent 完成 (耗时 {result.duration:.1f}s)")
-            print(f"   📝 记忆已更新: {cfg.SECRETARY_MEMORY_FILE}")
+            print(f"   📝 记忆已更新: {memory_file}")
     else:
         print(f"\n❌ 秘书 Agent 失败: {result.output[:300]}")
 
