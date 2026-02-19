@@ -10,3 +10,4 @@ workers/
 *.json
 secretary_memory.md
 agents/
+secretary/_pycache_/
