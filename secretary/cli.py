@@ -29,11 +29,23 @@ from secretary.settings import (
     get_cli_name, set_cli_name, get_base_dir, set_base_dir,
     get_model, set_model, get_language, load_settings,
 )
+from secretary.i18n import t
 
 
 def _cli_name() -> str:
     """获取当前 CLI 命令名 (用于帮助文本)"""
     return get_cli_name()
+
+
+def _is_workspace_configured(args) -> bool:
+    """检测是否已通过 kai base / -w / SECRETARY_WORKSPACE 设定工作区（未设定则使用 CWD）"""
+    if get_base_dir():
+        return True
+    if os.environ.get("SECRETARY_WORKSPACE", "").strip():
+        return True
+    if getattr(args, "workspace", None):
+        return True
+    return False
 
 
 def _check_process_exists(pid: int) -> bool:
@@ -211,16 +223,20 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
     from secretary.agents import update_worker_status, _worker_logs_dir
     
     try:
+        # 设置环境变量（在所有类型分支之前）
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
+        
         # 根据类型构建启动命令和配置
         if agent_type == "secretary":
-            # Secretary 使用 secretary.kai_scanner，统一使用 agents/<name>/logs/scanner.log
+            # Secretary 使用 scanner.run_kai_scanner，统一使用 agents/<name>/logs/scanner.log
             from secretary.agents import _worker_logs_dir
             log_dir = _worker_logs_dir(agent_name)
             log_dir.mkdir(parents=True, exist_ok=True)
             scanner_log_file = log_dir / "scanner.log"
-            # 传递 secretary_name 参数（通过环境变量）
-            sub_cmd = [sys.executable, "-m", "secretary.kai_scanner", "--verbose"]
-            env["SECRETARY_NAME"] = agent_name
+            # 直接调用 scanner.run_kai_scanner
+            sub_cmd = [sys.executable, "-c", f"from secretary.scanner import run_kai_scanner; run_kai_scanner(once=False, verbose=True, secretary_name='{agent_name}')"]
             
         elif agent_type == "worker":
             # Worker 使用 secretary.scanner --worker <name>
@@ -242,21 +258,12 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
             log_dir.mkdir(parents=True, exist_ok=True)
             scanner_log_file = log_dir / "scanner.log"
             sub_cmd = [sys.executable, "-m", "secretary.recycler"]
-            # Recycler 输出到 null，不保留日志
+            env["KAI_RECYCLE_BACKGROUND"] = "1"
             
         else:
             if not silent:
                 print(f"⚠️  未知的agent类型: {agent_type}，跳过启动 {agent_name}")
             return False
-        
-        # 设置环境变量
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUNBUFFERED"] = "1"
-        
-        # 所有类型都重定向输出到日志文件
-        if agent_type == "recycler":
-            env["KAI_RECYCLE_BACKGROUND"] = "1"
         
         # 打开日志文件用于重定向输出
         log_file_handle = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
@@ -292,7 +299,8 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
         
     except Exception as e:
         if not silent:
-            print(f"❌ 启动 {agent_name} ({agent_type}) 失败: {e}")
+            print(t("error_agent_start_failed"))
+            print(f"   详情: {e}")
         return False
 
 
@@ -454,8 +462,7 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
     # 检查是否有 secretary，如果没有则提示（不再检查 kai，因为可能使用其他 secretary）
     secretaries = [w for w in list_workers() if w.get("type") == "secretary"]
     if not secretaries:
-        print(f"⚠️  没有可用的secretary agent，无法提交任务")
-        print(f"   请先使用 `{_cli_name()} task` 命令（会自动创建secretary）或使用 `{_cli_name()} hire <name> secretary`")
+        print(t("error_no_secretary").format(name=_cli_name()))
         return
     
     # 收集所有 worker 的任务文件（用于检测新任务）
@@ -517,6 +524,8 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
 
 
 def cmd_task(args):
+    if not _is_workspace_configured(args):
+        print(t("workspace_not_set_hint").format(name=_cli_name()))
     request = " ".join(args.request)
     worker_name = getattr(args, "worker", None)
     # 如果指定了 worker，直接写入任务文件（前台执行）
@@ -681,7 +690,7 @@ def cmd_use_skill(args):
     task_file = invoke_skill(skill_name, min_time=args.time)
     if task_file:
         print(f"   ✅ 任务已写入: {cfg.DEFAULT_WORKER_NAME}/{task_file.name}")
-        print(f"   💡 用 `{_cli_name()} start {cfg.DEFAULT_WORKER_NAME}` 启动工作者来执行")
+        print(f"   💡 使用 `{_cli_name()} hire` 招募工作者来执行")
     else:
         print(f"   ❌ 技能模板为空，请检查 skills/{skill_name}.md")
         sys.exit(1)
@@ -804,10 +813,56 @@ def cmd_hire(args):
     register_agent(agent_name, agent_type=agent_type, description=description)
     print(f"✅ 已注册 {agent_type} agent: {agent_name}")
 
-    # 统一通过 _start_agent_scanner 启动（secretary / worker / recycler）
+    # 长时间操作提示，再启动
+    print(t("msg_starting_agent").format(agent_name=agent_name, agent_type=agent_type))
     _start_agent_scanner(agent_name, agent_type, silent=False)
 
 
+
+
+def cmd_workers(args):
+    """列出当前工作区内已注册的 agent（名称、类型、PID、状态等），与 kai monitor --text 对齐"""
+    if not _is_workspace_configured(args):
+        print(t("workspace_not_set_hint").format(name=_cli_name()))
+        return
+    from secretary.agents import list_workers
+
+    workers = list_workers()
+    name = _cli_name()
+
+    # 同步进程队列以便 PID 准确
+    _sync_processes_to_queue()
+    active_procs = _get_active_processes()
+    proc_pid_map = {p.get("name"): p.get("pid") for p in active_procs}
+
+    type_icons = {
+        "secretary": "🤖",
+        "worker": "👷",
+        "boss": "👔",
+        "recycler": "♻️",
+    }
+    status_icons = {"idle": "💤", "busy": "⚙️", "offline": "📴"}
+
+    print(f"\n📋 {name} 已注册 Agent")
+    print(f"   工作区: {cfg.BASE_DIR}\n")
+    if not workers:
+        print("   (无 agent，使用 kai hire 招募)")
+        return
+    # 表头与 monitor --text 列对齐，增加 PID
+    print(f"{'Agent':<18} {'类型':<12} {'执行中':<8} {'已完成':<8} {'状态':<4} {'PID':<8}")
+    print("-" * 62)
+    for w in workers:
+        agent_name = w.get("name", "unknown")
+        agent_type = w.get("type", "unknown")
+        executing = w.get("executing", False)
+        completed = w.get("completed_tasks", 0)
+        status_icon = status_icons.get(w.get("status", ""), "❓")
+        type_icon = type_icons.get(agent_type, "❓")
+        pid = proc_pid_map.get(agent_name) or w.get("pid")
+        pid_display = str(pid) if pid else "-"
+        exec_display = "✓" if executing else "✗"
+        print(f"{agent_name:<18} {type_icon} {agent_type:<10} {exec_display:<8} {completed:<8} {status_icon:<4} {pid_display:<8}")
+    print(f"\n   💡 查看日志: {name} check <名>  |  监控: {name} monitor  |  解雇: {name} fire <名>\n")
 
 
 def cmd_fire(args):
@@ -861,43 +916,9 @@ def cmd_fire(args):
             print(f"❌ 解雇失败: {worker_name}")
 
 
-def cmd_workers(args):
-    """列出所有已招募的工人"""
-    from secretary.agents import list_workers
-
-    workers = list_workers()
-    name = _cli_name()
-
-    if not workers:
-        print(f"\n👷 还没有招募任何工人")
-        print(f"   用 `{name} hire alice` 来招募一个叫 alice 的工人！")
-        print(f"   用 `{name} hire` 随机招募一个工人")
-        print(f"   用 `{name} start sen` 启动默认 worker")
-        return
-
-    print(f"\n👷 已招募的工人 ({len(workers)} 个):\n")
-    for w in workers:
-        status_icon = {"idle": "💤", "busy": "⚙️", "offline": "📴"}.get(w.get("status", ""), "❓")
-        pid_str = f"PID={w['pid']}" if w.get("pid") else ""
-        completed = w.get("completed_tasks", 0)
-        pending = w.get("pending_count", 0)
-        ongoing = w.get("ongoing_count", 0)
-        desc = w.get("description", "") or ""
-        print(f"   {status_icon} {w['name']:15s}  完成: {completed:3d}  待处理: {pending}  执行中: {ongoing}  {pid_str}")
-        if desc:
-            print(f"      📝 {desc}")
-        recent = w.get("recent_tasks", [])
-        if recent:
-            print(f"      📋 最近: {', '.join(recent[-3:])}")
-
-    print(f"\n   招募: {name} hire <名字>  (只注册，不启动)")
-    print(f"   启动: {name} start <名字>  (开始扫描任务)")
-    print(f"   解雇: {name} fire <名字>")
-
-
 def cmd_recycle(args):
     """启动回收者：复用 hire/start 体系。未注册则等价 hire recycler recycler，未运行则 _start_agent_scanner。"""
-    from secretary.recycler import run_recycler
+    from secretary.agent_types.recycler import run_recycler
     from secretary.agents import get_worker, register_agent
     import os
 
@@ -927,13 +948,15 @@ def cmd_recycle(args):
         return
 
     # 未运行则启动（与 start 逻辑一致）
-    print(f"\n♻️ 启动回收者（后台执行）\n")
+    print(t("msg_starting_recycler"))
     _start_agent_scanner(recycler_name, "recycler", silent=False)
 
 
 def cmd_monitor(args):
     """启动实时监控面板；--text/--once 时输出文本状态并退出，否则尝试 TUI（无 TUI 时退化为文本）"""
-    from secretary.dashboard import run_monitor
+    if not _is_workspace_configured(args):
+        print(t("workspace_not_set_hint").format(name=_cli_name()))
+    from secretary.ui.dashboard import run_monitor
     import subprocess
     import os
 
@@ -950,15 +973,14 @@ def cmd_monitor(args):
         return
 
     # TUI 模式：前台执行（不 spawn 子进程），便于用户直接与面板交互
-    print(f"\n📺 启动监控面板（前台，刷新间隔 {args.interval}s，Ctrl+C 退出）\n")
+    print(t("msg_starting_monitor"))
+    print(f"   刷新间隔 {args.interval}s，Ctrl+C 退出\n")
     run_monitor(refresh_interval=args.interval)
 
 
 # ============================================================
 #  控制命令
 # ============================================================
-
-
 
 def _stop_process(pid: int, name: str, verbose: bool = True):
     """停止指定 PID 的进程（辅助函数，供fire使用）"""
@@ -1133,7 +1155,7 @@ def cmd_check(args):
     worker = get_worker(worker_name)
     if not worker:
         print(f"❌ Agent '{worker_name}' 不存在")
-        print(f"   使用 `{_cli_name()} monitor` 查看所有 agent")
+        print(t("error_agent_not_found").format(name=_cli_name()))
         return
     
     # 检查 agent 是否在运行
@@ -1438,30 +1460,6 @@ def cmd_base(args):
 #  name 命令 — 改名
 # ============================================================
 
-def cmd_model(args):
-    """设置或查看默认模型"""
-    from secretary.settings import get_model, set_model
-    
-    if args.model_name:
-        # 设置模型
-        set_model(args.model_name)
-        print(f"✅ 已设置默认模型: {args.model_name}")
-        print(f"   当前配置: {get_model()}")
-    else:
-        # 查看当前模型
-        current = get_model()
-        env_model = os.environ.get("CURSOR_MODEL")
-        if env_model:
-            print(f"📊 当前模型设置:")
-            print(f"   配置文件: {current}")
-            print(f"   环境变量 (CURSOR_MODEL): {env_model} (优先)")
-            print(f"   实际使用: {env_model}")
-        else:
-            print(f"📊 当前模型: {current}")
-            print(f"   使用 `{_cli_name()} model <模型名>` 来修改")
-            print(f"   例如: {_cli_name()} model Auto")
-
-
 def cmd_name(args):
     """给 CLI 命令改名"""
     new_name = args.new_name
@@ -1486,29 +1484,33 @@ def cmd_name(args):
 
 
 def cmd_model(args):
-    """设置或查看模型"""
+    """设置或查看默认模型（支持环境变量 CURSOR_MODEL 优先）"""
     from secretary.settings import get_model, set_model
     name = _cli_name()
-    
+
     if args.model_name is None:
         # 查看当前模型
-        current_model = get_model()
+        current = get_model()
+        env_model = os.environ.get("CURSOR_MODEL")
         print(f"\n🤖 {name} 模型配置")
-        print(f"   当前模型: {current_model}")
+        if env_model:
+            print(f"   配置文件: {current}")
+            print(f"   环境变量 (CURSOR_MODEL): {env_model} (优先)")
+            print(f"   实际使用: {env_model}")
+        else:
+            print(f"   当前模型: {current}")
         print(f"\n   用法:")
         print(f"     {name} model Auto         设置为 Auto (自动选择)")
         print(f"     {name} model gpt-4       设置为 gpt-4")
         print(f"     {name} model claude-3    设置为 claude-3")
         return
-    
+
     # 设置模型
     new_model = args.model_name
     old_model = get_model()
-    
     if new_model == old_model:
         print(f"   ℹ️ 当前已经是 {old_model} 了")
         return
-    
     print(f"\n🤖 设置模型: {old_model} → {new_model}")
     set_model(new_model)
     print(f"   ✅ 已保存，后续任务将使用 {new_model} 模型")
@@ -1620,312 +1622,6 @@ def cmd_target(args):
     print(f"   监控Worker: {worker_name}")
 
 
-def cmd_report(args):
-    """查看任务报告：worker report 或 all report"""
-    worker_name = args.worker_name
-    
-    if not worker_name:
-        print("❌ 请指定 worker 名称或 'all'")
-        print("   用法: kai report alice   (查看 alice 的交互式报告)")
-        print("         kai report all     (查看所有任务报告)")
-        return
-    
-    if worker_name.lower() == "all":
-        _print_all_reports()
-    else:
-        # 交互式报告界面
-        from secretary.report_viewer import run_interactive_report
-        run_interactive_report(worker_name)
-
-
-def _print_worker_report(worker_name: str):
-    """打印指定 worker 的任务报告"""
-    from secretary.agents import list_workers, _worker_tasks_dir, _worker_ongoing_dir, get_worker
-    
-    # 检查 worker 是否存在
-    worker_info = get_worker(worker_name)
-    if not worker_info:
-        print(f"❌ Worker '{worker_name}' 不存在")
-        print(f"   使用 `{_cli_name()} workers` 查看所有 worker")
-        return
-    
-    print(f"\n📋 {worker_name} 的任务报告")
-    print(f"{'='*60}\n")
-    
-    # 1. 待处理任务
-    tasks_dir = _worker_tasks_dir(worker_name)
-    pending_tasks = sorted(tasks_dir.glob("*.md"), key=lambda p: p.stat().st_mtime) if tasks_dir.exists() else []
-    
-    print(f"📂 待处理任务 ({len(pending_tasks)} 个):")
-    if pending_tasks:
-        for task_file in pending_tasks:
-            mtime = datetime.fromtimestamp(task_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            try:
-                content = task_file.read_text(encoding="utf-8")
-                # 提取任务标题（第一行或 # 标题）
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_file.stem
-                print(f"   • [{mtime}] {task_file.name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-            except Exception:
-                print(f"   • [{mtime}] {task_file.name}")
-    else:
-        print("   (无)")
-    
-    # 2. 执行中任务
-    ongoing_dir = _worker_ongoing_dir(worker_name)
-    ongoing_tasks = sorted(ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime) if ongoing_dir.exists() else []
-    
-    print(f"\n⚙️  执行中任务 ({len(ongoing_tasks)} 个):")
-    if ongoing_tasks:
-        for task_file in ongoing_tasks:
-            mtime = datetime.fromtimestamp(task_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            try:
-                content = task_file.read_text(encoding="utf-8")
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_file.stem
-                print(f"   • [{mtime}] {task_file.name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-            except Exception:
-                print(f"   • [{mtime}] {task_file.name}")
-    else:
-        print("   (无)")
-    
-    # 3. 已完成报告（report/ 目录，存在则读）
-    reports = sorted(
-        [],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True
-    )
-    
-    print(f"\n✅ 已完成报告 ({len(reports)} 个):")
-    if reports:
-        for report_file in reports[:10]:  # 只显示最近10个
-            mtime = datetime.fromtimestamp(report_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            task_name = report_file.stem.replace("-report", "")
-            print(f"   • [{mtime}] {task_name}")
-    else:
-        print("   (无)")
-    
-    # 4. 统计信息
-    print(f"\n📊 统计:")
-    print(f"   - 已完成: {worker_info.get('completed_tasks', 0)} 个任务")
-    print(f"   - 待处理: {len(pending_tasks)} 个")
-    print(f"   - 执行中: {len(ongoing_tasks)} 个")
-    
-    print(f"\n{'='*60}\n")
-
-
-def _print_all_reports():
-    """打印所有任务的状态报告"""
-    from secretary.agents import list_workers, _worker_tasks_dir, _worker_ongoing_dir
-    
-    print(f"\n📋 所有任务报告")
-    print(f"{'='*60}\n")
-    
-    workers = list_workers()
-    
-    # 收集所有任务
-    all_pending = []  # [(worker_name, task_file), ...]
-    all_ongoing = []  # [(worker_name, task_file), ...]
-    
-    for w in workers:
-        worker_name = w["name"]
-        tasks_dir = _worker_tasks_dir(worker_name)
-        ongoing_dir = _worker_ongoing_dir(worker_name)
-        
-        if tasks_dir.exists():
-            for f in tasks_dir.glob("*.md"):
-                all_pending.append((worker_name, f))
-        
-        if ongoing_dir.exists():
-            for f in ongoing_dir.glob("*.md"):
-                all_ongoing.append((worker_name, f))
-    
-    # 1. 待处理任务
-    print(f"📂 待处理任务 (共 {len(all_pending)} 个):")
-    if all_pending:
-        for worker_name, task_file in sorted(all_pending, key=lambda x: x[1].stat().st_mtime):
-            mtime = datetime.fromtimestamp(task_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            try:
-                content = task_file.read_text(encoding="utf-8")
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_file.stem
-                print(f"   • [{worker_name}] [{mtime}] {task_file.name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-            except Exception:
-                print(f"   • [{worker_name}] [{mtime}] {task_file.name}")
-    else:
-        print("   (无)")
-    
-    # 2. 执行中任务
-    print(f"\n⚙️  执行中任务 (共 {len(all_ongoing)} 个):")
-    if all_ongoing:
-        for worker_name, task_file in sorted(all_ongoing, key=lambda x: x[1].stat().st_mtime):
-            mtime = datetime.fromtimestamp(task_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            try:
-                content = task_file.read_text(encoding="utf-8")
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_file.stem
-                print(f"   • [{worker_name}] [{mtime}] {task_file.name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-            except Exception:
-                print(f"   • [{worker_name}] [{mtime}] {task_file.name}")
-    else:
-        print("   (无)")
-    
-    # 3. 已解决任务（从recycler的solved目录读取）
-    recycler_dir = cfg.AGENTS_DIR / "recycler"
-    solved_dir = recycler_dir / "solved"
-    solved_reports = sorted(
-        solved_dir.glob("*-report.md"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True
-    ) if solved_dir.exists() else []
-    
-    print(f"\n✅ 已解决任务 (共 {len(solved_reports)} 个):")
-    if solved_reports:
-        for report_file in solved_reports[:20]:  # 显示最近20个
-            mtime = datetime.fromtimestamp(report_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            task_name = report_file.stem.replace("-report", "")
-            try:
-                content = report_file.read_text(encoding="utf-8")
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_name
-                print(f"   • [{mtime}] {task_name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-            except Exception:
-                print(f"   • [{mtime}] {task_name}")
-    else:
-        print("   (无)")
-    
-    # 4. 未解决任务（从recycler的unsolved目录读取）
-    unsolved_dir = recycler_dir / "unsolved"
-    unsolved_reports = sorted(
-        unsolved_dir.glob("*-report.md"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True
-    ) if unsolved_dir.exists() else []
-    
-    print(f"\n❌ 未解决任务 (共 {len(unsolved_reports)} 个):")
-    if unsolved_reports:
-        for report_file in unsolved_reports[:20]:  # 显示最近20个
-            mtime = datetime.fromtimestamp(report_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            task_name = report_file.stem.replace("-report", "")
-            try:
-                content = report_file.read_text(encoding="utf-8")
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_name
-                print(f"   • [{mtime}] {task_name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-                
-                # 尝试读取未解决原因
-                recycler_dir = cfg.AGENTS_DIR / "recycler"
-                unsolved_dir = recycler_dir / "unsolved"
-                reason_file = unsolved_dir / f"{task_name}-unsolved-reason.md"
-                if reason_file.exists():
-                    try:
-                        reason = reason_file.read_text(encoding="utf-8").strip().splitlines()
-                        if reason:
-                            print(f"     原因: {reason[0][:60]}{'...' if len(reason[0]) > 60 else ''}")
-                    except Exception:
-                        pass
-            except Exception:
-                print(f"   • [{mtime}] {task_name}")
-    else:
-        print("   (无)")
-    
-    # 5. 待审查报告（report/）
-    pending_reports = sorted(
-        [],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True
-    )
-    
-    print(f"\n📄 待审查报告 (共 {len(pending_reports)} 个):")
-    if pending_reports:
-        for report_file in pending_reports[:10]:  # 显示最近10个
-            mtime = datetime.fromtimestamp(report_file.stat().st_mtime).strftime("%m-%d %H:%M")
-            task_name = report_file.stem.replace("-report", "")
-            try:
-                content = report_file.read_text(encoding="utf-8")
-                lines = content.splitlines()
-                title = ""
-                for line in lines[:10]:
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("#").strip()
-                        break
-                if not title and lines:
-                    title = lines[0].strip()[:50]
-                if not title:
-                    title = task_name
-                print(f"   • [{mtime}] {task_name}")
-                print(f"     {title[:80]}{'...' if len(title) > 80 else ''}")
-            except Exception:
-                print(f"   • [{mtime}] {task_name}")
-    else:
-        print("   (无)")
-    
-    # 6. 统计汇总
-    print(f"\n📊 统计汇总:")
-    print(f"   - 待处理: {len(all_pending)} 个")
-    print(f"   - 执行中: {len(all_ongoing)} 个")
-    print(f"   - 已解决: {len(solved_reports)} 个")
-    print(f"   - 未解决: {len(unsolved_reports)} 个")
-    print(f"   - 待审查: {len(pending_reports)} 个")
-    print(f"   - 总任务数: {len(all_pending) + len(all_ongoing) + len(solved_reports) + len(unsolved_reports)} 个")
-    
-    print(f"\n{'='*60}\n")
-
-
 # ============================================================
 #  help 命令
 # ============================================================
@@ -1953,270 +1649,109 @@ def cmd_help(args):
         # 命令帮助字典
         cmd_helps = {
             "task": f"""
-📝 任务提交命令
+📝 提交任务
 
 用法:
-  {name} task "任务描述"
-  {name} task "任务描述" --time 120
-  {name} task "任务描述" --worker sen
-
-参数:
-  request          任务描述 (必需)
-  --time, -t       最低执行时间(秒), Agent提前完成也会被要求继续完善
-  --worker         直接分配给指定的agent,跳过秘书判断
-
-说明:
-  如果不指定worker,任务会写入 secretary agent 的 tasks/ 目录,由secretary的扫描器处理。
-  确保secretary的扫描器正在运行 (`{name} hire <name> secretary`),否则任务不会被处理。
-  使用 `{name} check <secretary_name>` 查看secretary的处理日志。
+  {name} task "任务描述" [--time 秒数] [--worker 名称]
 
 示例:
-  {name} task "实现一个HTTP服务器"
+  {name} task "实现HTTP服务器"
   {name} task "优化性能" --time 120
-  {name} task "修复bug" --worker sen
 """,
             "boss": f"""
-👔 创建并启动 Boss Agent
+👔 创建 Boss Agent
 
 用法:
-  {name} boss <boss名称> "持续目标" <worker名称>
-  {name} boss <boss名称> "持续目标" <worker名称> --once
-
-说明:
-  创建并启动一个 Boss Agent，监控指定 worker 的任务队列；当队列为空时，
-  根据持续目标自动生成新任务并写入该 worker 的 tasks 目录。
-
-参数:
-  boss_name        Boss 名称 (必需)
-  goal            持续目标描述 (必需，可多个词)
-  worker_name     被监控的 worker 名称 (必需)
-  --once          只执行一次检查与生成，不常驻后台
+  {name} boss <名称> "目标" <worker名称>
 
 示例:
   {name} boss myboss "完成登录模块" sen
-  {name} boss daily "每日代码审查" alice --once
-
-查看与停止:
-  {name} check <boss名称>  查看 Boss 日志
-  {name} fire <boss名称>  停止并删除该 Boss
 """,
             "use": f"""
 🎯 使用技能
 
 用法:
-  {name} use <技能名>
-  {name} use <技能名> --time 120
-  {name} use evolving
-
-说明:
-  使用已学会的技能,直接写入worker的tasks目录,跳过秘书判断。
-
-参数:
-  skill_name       技能名称 (必需)
-  --time           最低执行时间(秒)
+  {name} use <技能名> [--time 秒数]
 
 示例:
   {name} use evolving
-  {name} use analysis --time 60
 """,
             "learn": f"""
-📖 学习新技能
+📖 学习技能
 
 用法:
   {name} learn "任务描述" <技能名>
 
-说明:
-  学习一个新技能,保存为可复用的任务模板。
-
-参数:
-  description      任务描述 (必需)
-  skill_name       技能名称 (必需)
-
 示例:
-  {name} learn "分析代码性能瓶颈" performance-analysis
-  {name} learn "重构代码结构" refactor
+  {name} learn "分析性能瓶颈" performance
 """,
             "forget": f"""
 🧹 忘记技能
 
 用法:
   {name} forget <技能名>
-
-说明:
-  删除一个已学会的技能。
-
-参数:
-  skill_name       技能名称 (必需)
-
-示例:
-  {name} forget my-skill
 """,
             "skills": f"""
-📚 列出所有技能
+📚 列出技能
 
 用法:
   {name} skills
-
-说明:
-  显示所有已学会的技能,包括内置技能和自定义技能。
-
-内置技能:
-  - evolving: 代码演进
-  - analysis: 代码分析
-  - debug: 调试
 """,
             "hire": f"""
-👷 招募并启动 agent
+👷 招募 agent
 
 用法:
-  {name} hire [<名字>] [<类型>]
-  {name} hire alice worker
-  {name} hire recycler recycler
-  {name} hire <name> secretary
-  {name} hire alice -d "负责前端开发"
-
-说明:
-  招募并启动 agent。不指定名字则随机生成，不指定类型则默认为 worker。
-
-参数:
-  name              agent 名称 (可选)
-  type              agent 类型 (可选): secretary / worker / recycler
-  -d, --description 描述
+  {name} hire [<名字>] [<类型>] [-d "描述"]
 
 示例:
-  {name} hire
-  {name} hire alice
   {name} hire alice worker
   {name} hire recycler recycler
-  {name} hire <name> secretary
-""",
-            "start": f"""
-🚀 启动worker扫描器
-
-用法:
-  {name} start [worker_name]
-  {name} start sen
-  {name} start sen --once
-  {name} start sen -q
-
-说明:
-  启动worker的扫描器,开始处理任务队列。
-
-参数:
-  worker_name      工人名称 (可选,默认为sen)
-  --once           只执行一次扫描
-
-说明:
-  后台执行,输出写入workers/<worker_name>/logs/scanner.log。
-  使用 `{name} check <worker_name>` 查看输出。
-
-示例:
-  {name} start sen
-  {name} start alice --once
 """,
             "fire": f"""
-🔥 解雇工人
+🔥 解雇 agent
 
 用法:
-  {name} fire <worker_name>
-
-说明:
-  解雇(删除)一个worker及其所有数据。
-
-参数:
-  worker_name      要解雇的工人名称 (必需)
-
-示例:
-  {name} fire alice
+  {name} fire <名称>
+  {name} fire all         解雇所有 agent
 """,
             "workers": f"""
-👷 列出所有工人
+📋 列出 agent
 
 用法:
   {name} workers
 
 说明:
-  显示所有已招募的worker及其状态、任务统计等信息。
+  列出当前工作区内已注册的 agent（名称、类型、执行中、已完成、状态、PID），与 monitor --text 列对齐。
 """,
             "recycle": f"""
 ♻️ 启动回收者
 
 用法:
-  {name} recycle
-  {name} recycle --once
-  {name} recycle -q
-
-说明:
-  启动回收者,定期审查report/目录中的报告,决定任务是否完成。
-  后台执行,不保留日志。
-
-参数:
-  --once           只执行一次
+  {name} recycle [--once]
 """,
             "monitor": f"""
-📺 实时监控面板
+📺 监控面板
 
 用法:
-  {name} monitor
-  {name} monitor -i 5
-  {name} monitor --text
-  {name} monitor --once
-
-说明:
-  启动实时监控面板(TUI),显示系统状态、任务队列等信息。
-  --text / --once 时输出与旧 status 等价的文本状态后退出；
-  无 TUI 环境时自动退化为文本输出。
-
-参数:
-  -i, --interval   刷新间隔(秒),默认2秒
-  --text           输出文本状态后退出
-  --once           输出一次文本快照后退出
-
-示例:
-  {name} monitor
-  {name} monitor -i 5
-  {name} monitor --text
+  {name} monitor [--text] [--once] [-i 秒数]
 """,
             "check": f"""
-📺 实时查看 agent 的日志
+📺 查看日志
 
 用法:
-  {name} check <agent_name>
-  {name} check <agent_name> --tail 50
-
-说明:
-  实时 tail 后台进程的日志。所有 agent 的日志都在 agents/<name>/logs/scanner.log。
-
-参数:
-  worker_name      worker 名或 kai (必需)
-  --tail           只显示最后 N 行
-
-操作:
-  - 按 'q' 退出查看（不打断进程）
-  - 按 Ctrl+C 退出；仅当查看普通 worker 时会同时停止该 worker
-
-示例:
-  {name} check sen
-  {name} check kai
-  {name} check ykc --tail 100
+  {name} check <agent名称> [--tail 行数]
 """,
             "clean-logs": f"""
-🧹 清理日志文件
+🧹 清理日志
 
 用法:
   {name} clean-logs
-
-说明:
-  清空logs/目录下的所有日志文件。
 """,
             "clean-processes": f"""
-🧹 清理泄露的进程记录
+🧹 清理进程记录
 
 用法:
   {name} clean-processes
-
-说明:
-  检查并清理无效的worker进程PID记录。
 """,
             "base": f"""
 📁 设定/查看工作区
@@ -2275,59 +1810,16 @@ def cmd_help(args):
   {name} model gpt-4
 """,
             "target": f"""
-🎯 设定/列出/清空全局目标
+🎯 创建 Boss (快捷方式)
 
 用法:
-  {name} target
-  {name} target 任务1 任务2
-  {name} target --clear
-
-说明:
-  设定秘书的全局目标。秘书在处理任务时会参考这些目标进行归类与分配。
-
-参数:
-  goals            任务描述列表 (可选)
-  --clear          清空当前全局目标
-
-示例:
-  {name} target "完成登录模块" "优化性能"
-  {name} target --clear
-  {name} target
-""",
-            "report": f"""
-📋 查看任务报告
-
-用法:
-  {name} report <worker_name>
-  {name} report all
-
-说明:
-  查看指定worker的任务报告,或查看所有任务报告。
-
-参数:
-  worker_name      worker名称或'all' (必需)
-
-示例:
-  {name} report sen
-  {name} report alice
-  {name} report all
+  {name} target "目标描述"
 """,
             "help": f"""
-❓ 显示帮助信息
+❓ 帮助
 
 用法:
-  {name} help
-  {name} help <命令名>
-
-说明:
-  不指定命令名时，显示快速开始与完整命令列表。
-  指定命令名时，显示该命令的详细用法与说明。
-
-示例:
-  {name} help
-  {name} help task
-  {name} help boss
-  {name} help monitor
+  {name} help [命令名]
 """,
         }
         
@@ -2341,65 +1833,35 @@ def cmd_help(args):
             print(f"使用 '{name} help <命令名>' 查看特定命令的详细帮助")
         return
     
-    # 显示通用帮助信息 (根据 language 输出中/英)
-    from secretary.i18n import t
-    print(f"""
-{name} — {t('help_banner')}
-{'='*60}
-
-📖 {t('help_quick_start')}:
-  1. {t('help_set_workspace')}:     {name} base .
-  2. {t('help_submit_task')}:       {name} task "你的任务描述"
-  3. {t('help_start_worker')}:     {name} start sen
-  4. {t('help_view_status')}:       {name} monitor
-
-{'='*60}
-📋 {t('help_command_list')}:
-""")
-    
+    # 显示通用帮助信息（开头突出快速开始与常用命令）
+    print(f"\n{name} — 基于 Agent 的自动化任务系统\n")
+    print(f"   {t('help_quick_start_line').format(name=name)}")
+    print(f"   {t('help_common_commands')}\n")
     _print_command_list(name)
-    
-    print(f"""
-{'='*60}
-💡 {t('help_tips')}:
-  • 使用 '{name} help <命令名>' 查看特定命令的详细帮助
-  • 使用 '{name} <命令名> --help' 查看命令参数帮助
-  • 不输入任何命令进入交互模式
-  • 在交互模式下输入 'exit' 退出
-
-📚 {t('help_more')}:
-  • 任务流程: task → 秘书分配 → worker处理 → report
-  • 技能系统: 使用 learn 学习可复用任务模板
-  • Worker管理: hire → start → (处理任务) → fire
-  • 监控工具: monitor (TUI 或 kai monitor --text 文本快照)
-""")
+    print(f"\n💡 使用 '{name} help <命令名>' 查看详细帮助\n")
 
 def _print_command_list(name: str):
     """打印命令列表"""
     commands = [
         ("📝 任务相关", [
-            ("task", "提交任务 (经秘书Agent分类)"),
-            ("boss", "创建并启动Boss Agent，监控worker并在队列空时生成任务"),
+            ("task", "提交任务（经秘书分配或指定 worker）"),
+            ("boss", "创建并启动 Boss Agent，监控 worker 并在队列空时生成任务"),
         ]),
         ("📚 技能相关", [
             ("skills", "列出所有已学技能"),
             ("learn", "学习新技能"),
             ("forget", "忘掉一个技能"),
-            ("use", "使用技能 (直接写入tasks/)"),
+            ("use", "使用技能（直接写入 tasks/）"),
         ]),
         ("👷 Worker管理", [
-            ("hire", "招募并启动 agent (secretary/worker/recycler)"),
-            ("start", "启动 agent 扫描器"),
-            ("fire", "解雇 worker"),
-            ("workers", "列出所有 worker"),
-            ("check", "实时查看 worker/kai 日志输出"),
+            ("hire", "招募并启动 agent（secretary/worker/recycler）"),
+            ("fire", "解雇 agent"),
+            ("workers", "列出已注册的 agent"),
+            ("check", "实时查看 agent 日志输出"),
         ]),
         ("♻️ 后台服务", [
-            ("recycle", "启动回收者 (审查报告)"),
-            ("monitor", "实时监控面板 (TUI)；--text/--once 文本快照"),
-        ]),
-        ("📊 状态与报告", [
-            ("report", "查看任务报告"),
+            ("recycle", "启动回收者（审查报告）"),
+            ("monitor", "实时监控面板；--text/--once 文本快照"),
         ]),
         ("⚙️ 设置", [
             ("base", "设定/查看工作区目录"),
@@ -2417,11 +1879,9 @@ def _print_command_list(name: str):
     ]
     
     for category, cmds in commands:
-        print(f"\n{category}:")
+        print(f"{category}:")
         for cmd, desc in cmds:
-            # 计算合适的对齐宽度
-            cmd_width = max(len(cmd) for _, _ in cmds) + 2
-            print(f"  {name} {cmd:<{cmd_width}} - {desc}")
+            print(f"  {name} {cmd:<12} {desc}")
 
 
 # ============================================================
@@ -2461,9 +1921,10 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
         pass
     
     # 打印欢迎信息 + 首次状态栏
-    print(f"\n🔄 {name} 交互模式 — 输入子命令，exit 退出，monitor 监控面板")
+    print(f"\n🔄 {name} 交互模式 — 输入子命令，monitor 监控面板")
+    print(f"   {t('interactive_welcome')}")
     try:
-        from secretary.dashboard import print_status_line
+        from secretary.ui.dashboard import print_status_line
         print_status_line()
     except Exception:
         pass
@@ -2493,13 +1954,22 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             break
         if line.lower() == "bar":
             try:
-                from secretary.dashboard import print_status_line
+                from secretary.ui.dashboard import print_status_line
                 print_status_line()
             except Exception as e:
                 print(f"   ⚠️ {e}")
             continue
 
-        parts = shlex.split(line)
+        try:
+            parts = shlex.split(line)
+        except ValueError as e:
+            # 处理引号不匹配等解析错误
+            if "No closing quotation" in str(e) or "quotation" in str(e).lower():
+                print("   ❓ 引号不匹配，请检查输入的命令")
+            else:
+                print(f"   ❓ 命令解析错误: {e}")
+            continue
+        
         if not parts:
             continue
 
@@ -2578,10 +2048,12 @@ def _get_all_skill_names() -> set:
 
 def main():
     name = _cli_name()
+    _quick_start = t("help_quick_start_line").format(name=name)
+    _common = t("help_common_commands")
 
     parser = argparse.ArgumentParser(
         prog=name,
-        description=f"{name} — 基于 Agent 的自动化任务系统",
+        description=f"{name} — 基于 Agent 的自动化任务系统\n\n{_quick_start}\n{_common}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 角色:
@@ -2602,11 +2074,9 @@ def main():
 工人管理:
   {name} hire                       👷 招募 worker (只注册，不启动)
   {name} hire alice                 👷 招募叫 alice 的 worker
-  {name} start sen                  🚀 启动 sen agent 的扫描器
-  {name} start alice                🚀 启动 alice agent 的扫描器
   {name} hire <name> secretary      🤖 创建并启动 secretary agent
   {name} fire alice                 🔥 解雇 alice
-  {name} workers                    📋 列出所有工人
+  {name} workers                    📋 列出已注册的 agent
 
 技能:
   {name} skills                     📚 列出所有技能
@@ -2657,10 +2127,14 @@ def main():
     time_help = "最低执行时间(秒)，Agent 提前完成也会被要求继续完善直到达到此时间"
 
     # ---- task ----
-    p = subparsers.add_parser("task", help="提交自定义任务 (经秘书Agent分类)")
+    p = subparsers.add_parser(
+        "task",
+        help="提交任务（经秘书分配或直接指定 worker）",
+        description="提交任务描述，由秘书 Agent 分配或通过 --worker 直接指定执行者。",
+    )
     p.add_argument("request", nargs="+", help="任务描述")
     p.add_argument("--time", type=int, default=0, help=time_help)
-    p.add_argument("--worker", type=str, default=None, help="直接分配给指定的 worker，跳过秘书判断")
+    p.add_argument("--worker", type=str, default=None, help="直接分配给指定 worker，跳过秘书")
     
     # ---- boss ----
     p = subparsers.add_parser("boss", help="👔 创建并启动Boss Agent：监控指定worker，在队列为空时生成新任务")
@@ -2688,27 +2162,33 @@ def main():
     subparsers.add_parser("skills", help="📚 列出所有已学技能")
 
     # ---- hire ----
-    p = subparsers.add_parser("hire", help="👷 招募并启动 agent (name [type]，type: secretary/worker/recycler)")
+    p = subparsers.add_parser(
+        "hire",
+        help="招募并启动 agent（secretary/worker/recycler）",
+        description="招募并启动后台 agent。可指定名称与类型，不填则随机取名且类型为 worker。",
+    )
     p.add_argument("worker_names", nargs="*", default=None,
-                   help="agent 名与可选类型 (如 alice worker, recycler recycler); 不填则随机取名且 type=worker")
+                   help="名称与可选类型，如 alice worker、recycler recycler；不填则随机取名")
     p.add_argument("-d", "--description", type=str, default="", help="描述")
-
-    # ---- start ----
-    p = subparsers.add_parser("start", help="🚀 启动 agent 扫描器 (开始处理任务)")
-    p.add_argument("worker_names", nargs="*", default=None,
-                   help="Agent名，可多个 (如 alice bob); 不填则启动默认 agent (sen)")
-    p.add_argument("--once", action="store_true", help="只执行一次")
 
     # ---- fire ----
     p = subparsers.add_parser("fire", help="🔥 解雇一个或多个工人")
     p.add_argument("worker_names", nargs="+", help="要解雇的工人名，可多个 (如 alice bob)")
 
     # ---- workers ----
-    subparsers.add_parser("workers", help="👷 列出所有已招募的工人")
+    subparsers.add_parser(
+        "workers",
+        help="列出已注册的 agent（名称、类型、PID、状态）",
+        description="列出当前工作区内已注册的 agent，与 monitor --text 列对齐。",
+    )
 
     # ---- recycle ----
-    p = subparsers.add_parser("recycle", help="♻️ 启动回收者")
-    p.add_argument("--once", action="store_true", help="只执行一次")
+    p = subparsers.add_parser(
+        "recycle",
+        help="启动回收者（审查报告）",
+        description="启动回收者，定期审查 report/ 中的报告。--once 表示前台执行一次后退出。",
+    )
+    p.add_argument("--once", action="store_true", help="前台执行一次后退出")
 
     # ---- base ----
     p = subparsers.add_parser("base", help="📁 设定/查看工作区目录")
@@ -2724,21 +2204,21 @@ def main():
     p.add_argument("model_name", nargs="?", help="模型名称 (如 Auto, gpt-4, claude-3)，不指定则查看当前设置")
 
     # ---- monitor ----
-    p = subparsers.add_parser("monitor", help="📺 实时监控面板 (TUI)；--text/--once 输出文本状态")
+    p = subparsers.add_parser(
+        "monitor",
+        help="实时监控面板（TUI 或文本快照）",
+        description="启动监控面板，查看 Agent 与任务状态。--text 或 --once 为文本输出后退出。",
+    )
     p.add_argument("-i", "--interval", type=float, default=2.0,
-                   help="刷新间隔(秒), 默认 2s")
-    p.add_argument("--text", action="store_true", help="输出文本状态后退出（与旧 status 等价）")
-    p.add_argument("--once", action="store_true", help="输出一次文本快照后退出")
+                   help="刷新间隔（秒），默认 2")
+    p.add_argument("--text", action="store_true", help="输出文本状态后退出")
+    p.add_argument("--once", action="store_true", help="输出一次快照后退出")
 
     # ---- target ----
     p = subparsers.add_parser("target", help="🎯 创建Boss Agent的别名：target \"tasks\" = boss yks \"tasks\" ykc")
     p.add_argument("goal", nargs="+", help="持续目标描述")
 
     # ---- report ----
-    p = subparsers.add_parser("report", help="📋 查看任务报告 (worker report 或 all report)")
-    p.add_argument("worker_name", nargs="?", default=None,
-                   help="工人名 (如 alice) 或 'all' 查看所有任务")
-
     # ---- help ----
     p = subparsers.add_parser("help", help="❓ 显示帮助信息")
     p.add_argument("command_name", nargs="?", default=None,
@@ -2770,7 +2250,6 @@ def main():
         "name": cmd_name,
         "model": cmd_model,
         "target": cmd_target,
-        "report": cmd_report,
         "help": cmd_help,
     }
 

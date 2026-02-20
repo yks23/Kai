@@ -13,21 +13,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-# Windows 和 Unix 的键盘输入处理
-if sys.platform == "win32":
-    try:
-        import msvcrt
-    except ImportError:
-        msvcrt = None
-else:
-    try:
-        import select
-        import termios
-        import tty
-    except ImportError:
-        select = None
-        termios = None
-        tty = None
+# 使用公共的键盘输入处理
+from secretary.ui.common import setup_keyboard_input, restore_keyboard_input, read_key
 
 from rich.console import Console
 from rich.live import Live
@@ -140,14 +127,13 @@ def _build_simple_dashboard(refresh_interval: float = 2.0) -> Layout:
     )
     table.add_column("Agent", style="cyan", width=15)
     table.add_column("类型", style="magenta", width=10)
-    table.add_column("待处理", style="yellow", justify="right", width=6)
-    table.add_column("执行中", style="cyan", justify="right", width=6)
-    table.add_column("已完成", style="green", justify="right", width=6)
+    table.add_column("执行中", style="cyan", justify="center", width=8)
+    table.add_column("已完成", style="green", justify="right", width=8)
     table.add_column("状态", style="dim", width=4)
     table.add_column("PID", style="dim", justify="right", width=8)
     
     if not workers:
-        table.add_row("(无agent)", "", "", "", "", "", "")
+        table.add_row("(无agent)", "", "", "", "", "")
     else:
         type_icons = {
             "secretary": "🤖",
@@ -158,13 +144,15 @@ def _build_simple_dashboard(refresh_interval: float = 2.0) -> Layout:
         for w in workers:
             agent_name = w.get("name", "unknown")
             agent_type = w.get("type", "unknown")
-            pending = w.get("pending_count", 0)
-            ongoing = w.get("ongoing_count", 0)
+            executing = w.get("executing", False)
             completed = w.get("completed_tasks", 0)
             status_icon = {"idle": "💤", "busy": "⚙️", "offline": "📴"}.get(w.get("status", ""), "❓")
             
             type_icon = type_icons.get(agent_type, "❓")
             type_display = f"{type_icon} {agent_type}"
+            
+            # 执行中显示勾或叉
+            executing_display = "✓" if executing else "✗"
             
             # 获取PID（从进程队列或agents.json）
             pid = proc_pid_map.get(agent_name) or w.get("pid")
@@ -173,37 +161,31 @@ def _build_simple_dashboard(refresh_interval: float = 2.0) -> Layout:
             table.add_row(
                 agent_name,
                 type_display,
-                str(pending),
-                str(ongoing),
+                executing_display,
                 str(completed),
                 status_icon,
                 pid_display,
             )
     
-    # 添加时间戳
+    # 底部提示：第一行 时间/刷新/退出，第二行 日志与报告引导
     now = datetime.now().strftime("%H:%M:%S")
-    footer = Text(justify="center")
-    footer.append(f" ⏱  {now} ", style="dim")
-    footer.append("│", style="dim")
-    footer.append(f" 每 {refresh_interval}s 刷新 ", style="dim")
-    footer.append("│", style="dim")
-    footer.append(" q 退出 ", style="dim italic")
-    
-    # 计算布局大小（确保至少能显示表头和所有数据行）
-    # header (1行) + border (2行) + rows
-    if workers:
-        # 有数据：header + border + 数据行数，至少5行（1 header + 2 border + 2 rows）
-        table_size = max(len(workers) + 3, 5)
-    else:
-        # 无数据：header + border + 1行提示
-        table_size = 4
+    name = get_cli_name()
+    footer1 = Text(justify="center")
+    footer1.append(f" ⏱  {now} ", style="dim")
+    footer1.append("│", style="dim")
+    footer1.append(f" 每 {refresh_interval}s 刷新 ", style="dim")
+    footer1.append("│", style="dim")
+    footer1.append(" q 退出 ", style="dim italic")
+    footer2 = Text(justify="center")
+    footer2.append(f" 日志: {name} check <名> ", style="dim")
+    footer2.append("│", style="dim")
+    footer2.append(" 报告: (待接 report 命令) ", style="dim")
     
     layout = Layout()
-    # 使用计算的大小，确保表格完整显示
-    # 不设置 size，让表格自动适应内容
     layout.split_column(
         Layout(Panel(table, title="[bold]Agent状态与进程[/]", border_style="cyan")),
-        Layout(footer, size=1),
+        Layout(footer1, size=1),
+        Layout(footer2, size=1),
     )
     
     return layout
@@ -261,14 +243,13 @@ def print_status_text():
         print("   (无agent)")
     else:
         # 表头
-        print(f"{'Agent':<20} {'类型':<12} {'待处理':<8} {'执行中':<8} {'已完成':<8} {'状态'}")
+        print(f"{'Agent':<20} {'类型':<12} {'执行中':<10} {'已完成':<10} {'状态'}")
         print("-" * 70)
         
         for w in workers:
             agent_name = w.get("name", "unknown")
             agent_type = w.get("type", "unknown")
-            pending = w.get("pending_count", 0)
-            ongoing = w.get("ongoing_count", 0)
+            executing = w.get("executing", False)
             completed = w.get("completed_tasks", 0)
             status_icon = {"idle": "💤", "busy": "⚙️", "offline": "📴"}.get(w.get("status", ""), "❓")
             
@@ -281,7 +262,10 @@ def print_status_text():
             }
             type_icon = type_icons.get(agent_type, "❓")
             
-            print(f"{type_icon} {agent_name:<17} {agent_type:<12} {pending:<8} {ongoing:<8} {completed:<8} {status_icon}")
+            # 执行中显示勾或叉
+            executing_display = "✓" if executing else "✗"
+            
+            print(f"{type_icon} {agent_name:<17} {agent_type:<12} {executing_display:<10} {completed:<10} {status_icon}")
     
     # 显示活跃进程：完全基于全局队列
     active_procs = []
@@ -332,47 +316,21 @@ def run_monitor(refresh_interval: float = 2.0, text_mode: bool = False, once: bo
     console = Console()
     stop = threading.Event()
 
-    # 后台线程: 非阻塞读取按键（Windows 兼容）
+    # 后台线程: 非阻塞读取按键（使用公共函数）
     def _key_listener():
-        if sys.platform == "win32" and msvcrt:
-            # Windows 使用 msvcrt
-            try:
-                while not stop.is_set():
-                    if msvcrt.kbhit():
-                        try:
-                            ch = msvcrt.getch().decode('utf-8').lower()
-                        except UnicodeDecodeError:
-                            # 处理特殊按键
-                            ch = msvcrt.getch()
-                            continue
-                        if ch == "q" or ch == "\x1b":  # q 或 ESC
-                            stop.set()
-                            return
-                    time.sleep(0.2)
-            except Exception:
-                pass
-        elif select and termios and tty:
-            # Unix/Linux 使用 termios
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)  # cbreak 模式: 单字符读取, 不回显
-                while not stop.is_set():
-                    # select 等待 0.2s, 避免 busy-loop
-                    if select.select([sys.stdin], [], [], 0.2)[0]:
-                        ch = sys.stdin.read(1)
-                        if ch.lower() == "q" or ch == "\x1b":
-                            stop.set()
-                            return
-            except Exception:
-                pass
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        else:
-            # 降级：使用提示模式
-            console.print("[yellow]⚠️  键盘监听不可用，使用 Ctrl+C 退出[/]")
+        original_settings, success = setup_keyboard_input()
+        try:
             while not stop.is_set():
-                time.sleep(1)
+                ch = read_key(timeout=0.2)
+                if ch:
+                    ch_lower = ch.lower()
+                    if ch_lower == "q" or ch == "\x1b":  # q 或 ESC
+                        stop.set()
+                        return
+        except Exception:
+            pass
+        finally:
+            restore_keyboard_input(original_settings)
 
     listener = threading.Thread(target=_key_listener, daemon=True)
     listener.start()

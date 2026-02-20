@@ -3,9 +3,11 @@
 
 每个 agent 类型通过配置来定义：
 - 触发规则（统一：监视目录是否有文件或为空）
-- 终止条件（kai：单次执行；worker：直到删除ongoing文件）
-- 提示词模板（kai：secretary.md；worker：worker_first_round.md等）
+- 终止条件（secretary/boss/recycler：单次执行；worker：直到删除ongoing文件）
+- 提示词模板（secretary.md、boss.md、recycler.md、worker_first_round.md等）
 - 处理逻辑（如何调用agent）
+
+注意：具体的 agent 类型定义已移至 secretary/agent_types/ 目录
 """
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,7 +72,7 @@ class AgentConfig:
     first_round_prompt: str  # 首轮提示词模板
     
     # 终止条件（有默认值）
-    termination: TerminationCondition = TerminationCondition.SINGLE_RUN
+    termination: TerminationCondition = TerminationCondition.UNTIL_FILE_DELETED
     
     # 触发配置（有默认值）
     trigger: TriggerConfig = field(default_factory=lambda: TriggerConfig())
@@ -86,7 +88,7 @@ class AgentConfig:
     label: str = ""
     
     # 是否需要ongoing目录（有默认值）
-    use_ongoing: bool = True  # kai不需要ongoing，worker需要
+    use_ongoing: bool = True  # secretary/boss/recycler不需要ongoing，worker需要
     
     # 输出目录（某些agent可能需要，如kai的assigned，有默认值）
     output_dir: Path | None = None
@@ -96,120 +98,22 @@ class AgentConfig:
 
 
 def build_worker_config(base_dir: Path, worker_name: str) -> AgentConfig:
-    """构建 Worker 的配置"""
-    worker_dir = base_dir / "agents" / worker_name
-    return AgentConfig(
-        name=worker_name,
-        base_dir=worker_dir,
-        tasks_dir=worker_dir / "tasks",
-        ongoing_dir=worker_dir / "ongoing",
-        reports_dir=worker_dir / "reports",
-        logs_dir=worker_dir / "logs",
-        stats_dir=worker_dir / "stats",
-        trigger=TriggerConfig(
-            # worker只需要监视tasks目录，ongoing目录是处理任务时使用的，不应该作为触发条件
-            watch_dirs=[worker_dir / "tasks"],
-            condition=TriggerCondition.HAS_FILES,
-        ),
-        termination=TerminationCondition.UNTIL_FILE_DELETED,
-        first_round_prompt="worker_first_round.md",
-        continue_prompt="worker_continue.md",
-        refine_prompt="worker_refine.md",
-        use_ongoing=True,
-        log_file=worker_dir / "logs" / "scanner.log",
-        label=f"👷 {worker_name}",
-    )
+    """构建 Worker 的配置（使用集中化定义）"""
+    from secretary.agent_types import WorkerAgent
+    agent_type = WorkerAgent()
+    return agent_type.build_config(base_dir, worker_name)
 
 
 def build_boss_config(base_dir: Path, boss_name: str) -> AgentConfig:
-    """
-    构建 Boss 的配置
-    
-    Boss的触发规则：检查所监视worker的tasks/和ongoing/是否为空
-    如果为空，创建虚拟触发文件
-    """
-    boss_dir = base_dir / "agents" / boss_name
-    
-    # Boss使用自定义触发函数（需要动态获取worker目录）
-    def boss_trigger_fn(config: AgentConfig) -> List[Path]:
-        """Boss的触发函数：检查worker的目录是否为空"""
-        from secretary.boss import _load_boss_worker_name
-        from secretary.agents import _worker_tasks_dir, _worker_ongoing_dir
-        
-        worker_name = _load_boss_worker_name(config.base_dir)
-        if not worker_name:
-            return []
-        
-        worker_tasks_dir = _worker_tasks_dir(worker_name)
-        worker_ongoing_dir = _worker_ongoing_dir(worker_name)
-        
-        # 检查worker的tasks/和ongoing/是否为空
-        pending_count = len(list(worker_tasks_dir.glob("*.md"))) if worker_tasks_dir.exists() else 0
-        ongoing_count = len(list(worker_ongoing_dir.glob("*.md"))) if worker_ongoing_dir.exists() else 0
-        
-        # 如果worker的队列不为空，不触发
-        if pending_count > 0 or ongoing_count > 0:
-            return []
-        
-        # 如果为空，创建虚拟触发文件
-        trigger_file = config.base_dir / ".boss_trigger"
-        if not trigger_file.exists():
-            trigger_file.touch()
-        return [trigger_file]
-    
-    return AgentConfig(
-        name=boss_name,
-        base_dir=boss_dir,
-        tasks_dir=boss_dir / "tasks",
-        ongoing_dir=boss_dir / "ongoing",
-        reports_dir=boss_dir / "reports",
-        logs_dir=boss_dir / "logs",
-        stats_dir=boss_dir / "stats",
-        trigger=TriggerConfig(
-            watch_dirs=[],  # Boss不使用标准目录监视，使用自定义函数
-            condition=TriggerCondition.IS_EMPTY,
-            create_virtual_file=True,
-            virtual_file_name=".boss_trigger",
-            custom_trigger_fn=boss_trigger_fn,
-        ),
-        termination=TerminationCondition.SINGLE_RUN,  # Boss每次处理一个任务后终止，等待下次触发
-        first_round_prompt="boss.md",
-        use_ongoing=False,  # Boss不需要ongoing目录
-        log_file=boss_dir / "logs" / "scanner.log",
-        label=f"👔 {boss_name}",
-    )
+    """构建 Boss 的配置（使用集中化定义）"""
+    from secretary.agent_types import BossAgent
+    agent_type = BossAgent()
+    return agent_type.build_config(base_dir, boss_name)
 
 
 def build_recycler_config(base_dir: Path, recycler_name: str = "recycler") -> AgentConfig:
-    """
-    构建 Recycler 的配置
-    
-    Recycler的触发规则：扫描所有agent的reports/目录，查找*-report.md文件
-    """
-    recycler_dir = base_dir / "agents" / recycler_name
-    
-    def recycler_trigger_fn(config: AgentConfig) -> List[Path]:
-        """Recycler的触发函数：扫描所有agent的reports目录"""
-        from secretary.recycler import _find_report_files
-        return _find_report_files()
-    
-    return AgentConfig(
-        name=recycler_name,
-        base_dir=recycler_dir,
-        tasks_dir=recycler_dir / "tasks",
-        ongoing_dir=recycler_dir / "ongoing",
-        reports_dir=recycler_dir / "reports",
-        logs_dir=recycler_dir / "logs",
-        stats_dir=recycler_dir / "stats",
-        trigger=TriggerConfig(
-            watch_dirs=[],  # Recycler不使用标准目录监视，使用自定义函数扫描所有reports
-            condition=TriggerCondition.HAS_FILES,
-            custom_trigger_fn=recycler_trigger_fn,
-        ),
-        termination=TerminationCondition.SINGLE_RUN,  # Recycler每次处理一个报告后终止，等待下次触发
-        first_round_prompt="recycler.md",
-        use_ongoing=False,  # Recycler不需要ongoing目录
-        log_file=recycler_dir / "logs" / "scanner.log",
-        label=f"♻️ {recycler_name}",
-    )
+    """构建 Recycler 的配置（使用集中化定义）"""
+    from secretary.agent_types import RecyclerAgent
+    agent_type = RecyclerAgent()
+    return agent_type.build_config(base_dir, recycler_name)
 

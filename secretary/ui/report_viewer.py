@@ -15,21 +15,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-# Windows 和 Unix 的键盘输入处理
-if sys.platform == "win32":
-    try:
-        import msvcrt
-    except ImportError:
-        msvcrt = None
-else:
-    try:
-        import select
-        import termios
-        import tty
-    except ImportError:
-        select = None
-        termios = None
-        tty = None
+# 使用公共的键盘输入处理
+from secretary.ui.common import setup_keyboard_input, restore_keyboard_input, read_key
 
 from rich.console import Console
 from rich.live import Live
@@ -298,71 +285,27 @@ def run_interactive_report(worker_name: str):
         console.print(f"[yellow]⚠️  {worker_name} 暂无任务[/]")
         return
     
-    # 键盘监听（Windows 兼容）
+    # 键盘监听（使用公共函数）
     def _key_listener():
-        if sys.platform == "win32" and msvcrt:
-            # Windows 使用 msvcrt
-            try:
-                while not stop.is_set():
-                    if msvcrt.kbhit():
-                        try:
-                            ch = msvcrt.getch().decode('utf-8').lower()
-                        except UnicodeDecodeError:
-                            # 处理特殊按键
-                            ch = msvcrt.getch()
-                            continue
-                        if ch == "q":
-                            stop.set()
-                            return
-                        elif ch == "p":  # previous
-                            if current_index[0] > 0:
-                                current_index[0] -= 1
-                        elif ch == "n":  # next
-                            if current_index[0] < len(tasks) - 1:
-                                current_index[0] += 1
-                    time.sleep(0.1)
-            except Exception:
-                pass
-        elif select and termios and tty:
-            # Unix/Linux 使用 termios
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            try:
-                tty.setcbreak(fd)
-                while not stop.is_set():
-                    if select.select([sys.stdin], [], [], 0.2)[0]:
-                        ch = sys.stdin.read(1).lower()
-                        if ch == "q":
-                            stop.set()
-                            return
-                        elif ch == "p":  # previous
-                            if current_index[0] > 0:
-                                current_index[0] -= 1
-                        elif ch == "n":  # next
-                            if current_index[0] < len(tasks) - 1:
-                                current_index[0] += 1
-            except Exception:
-                pass
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        else:
-            # 降级：使用 input() 提示
-            console.print("[yellow]⚠️  键盘监听不可用，使用输入模式[/]")
+        original_settings, success = setup_keyboard_input()
+        try:
             while not stop.is_set():
-                try:
-                    cmd = input("\n命令 (p/n/q): ").strip().lower()
-                    if cmd == "q":
+                ch = read_key(timeout=0.1)
+                if ch:
+                    ch_lower = ch.lower()
+                    if ch_lower == "q":
                         stop.set()
                         return
-                    elif cmd == "p":
+                    elif ch_lower == "p":  # previous
                         if current_index[0] > 0:
                             current_index[0] -= 1
-                    elif cmd == "n":
+                    elif ch_lower == "n":  # next
                         if current_index[0] < len(tasks) - 1:
                             current_index[0] += 1
-                except (EOFError, KeyboardInterrupt):
-                    stop.set()
-                    return
+        except Exception:
+            pass
+        finally:
+            restore_keyboard_input(original_settings)
     
     listener = threading.Thread(target=_key_listener, daemon=True)
     listener.start()

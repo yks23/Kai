@@ -45,6 +45,51 @@ MESSAGES = {
     "help_command_list": {"zh": "命令列表", "en": "Commands"},
     "help_tips": {"zh": "使用提示", "en": "Tips"},
     "help_more": {"zh": "更多信息", "en": "More"},
+    # 快速开始一行（占位 {name}）
+    "help_quick_start_line": {
+        "zh": "快速开始: {name} base . → {name} task \"...\" → {name} monitor --text → {name} hire",
+        "en": "Quick start: {name} base . → {name} task \"...\" → {name} monitor --text → {name} hire",
+    },
+    "help_common_commands": {
+        "zh": "常用命令: base 设定工作区 | task 提交任务 | monitor 查看状态 | hire 招募工人 | help 帮助",
+        "en": "Common: base | task | monitor | hire | help",
+    },
+    # 未设置工作区提示
+    "workspace_not_set_hint": {
+        "zh": "💡 未设置工作区，当前使用当前目录。建议先在工作区目录执行: {name} base .",
+        "en": "💡 Workspace not set (using current directory). Run in your project dir: {name} base .",
+    },
+    # 交互模式欢迎
+    "interactive_welcome": {
+        "zh": "输入 help 或 task \"描述\" 开始；输入 exit 退出。",
+        "en": "Type help or task \"description\"; exit to quit.",
+    },
+    # 长时间操作提示（进行中）
+    "msg_starting_agent": {
+        "zh": "正在启动 {agent_name} ({agent_type})…",
+        "en": "Starting {agent_name} ({agent_type})…",
+    },
+    "msg_starting_recycler": {
+        "zh": "正在启动回收者…",
+        "en": "Starting recycler…",
+    },
+    "msg_starting_monitor": {
+        "zh": "正在启动监控面板…",
+        "en": "Starting monitor…",
+    },
+    # 错误与状态：用户可读说明（技术细节另打印）
+    "error_agent_start_failed": {
+        "zh": "启动失败，请检查工作区、权限或网络。",
+        "en": "Start failed. Check workspace, permissions, or network.",
+    },
+    "error_no_secretary": {
+        "zh": "没有可用的秘书 Agent，无法提交任务。请先执行: {name} task \"描述\"（会自动创建）或 {name} hire <名称> secretary",
+        "en": "No secretary agent. Run: {name} task \"...\" (auto-create) or {name} hire <name> secretary",
+    },
+    "error_agent_not_found": {
+        "zh": "未找到该 Agent。使用 {name} monitor 查看所有 Agent。",
+        "en": "Agent not found. Use {name} monitor to list all agents.",
+    },
 }
 
 

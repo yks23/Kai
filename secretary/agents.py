@@ -76,44 +76,17 @@ def _save_registry(registry: dict):
     af.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _worker_dir(worker_name: str) -> Path:
-    """获取 worker 的基础目录：agents/<name>"""
-    return cfg.AGENTS_DIR / worker_name
-
-
-def _worker_tasks_dir(worker_name: str) -> Path:
-    """获取 worker 的 tasks 目录：agents/<name>/tasks"""
-    return _worker_dir(worker_name) / "tasks"
-
-
-def _worker_assigned_dir(worker_name: str) -> Path:
-    """获取 agent 的 assigned 目录：agents/<name>/assigned（秘书类型使用）"""
-    return _worker_dir(worker_name) / "assigned"
-
-
-def _worker_ongoing_dir(worker_name: str) -> Path:
-    """获取 worker 的 ongoing 目录：agents/<name>/ongoing"""
-    return _worker_dir(worker_name) / "ongoing"
-
-
-def _worker_logs_dir(worker_name: str) -> Path:
-    """获取 worker 的 logs 目录路径：agents/<name>/logs"""
-    return _worker_dir(worker_name) / "logs"
-
-
-def _worker_stats_dir(worker_name: str) -> Path:
-    """获取 worker 的 stats 目录路径：agents/<name>/stats"""
-    return _worker_dir(worker_name) / "stats"
-
-
-def _worker_reports_dir(worker_name: str) -> Path:
-    """获取 worker 的 reports 目录路径：agents/<name>/reports"""
-    return _worker_dir(worker_name) / "reports"
-
-
-def _worker_memory_file(worker_name: str) -> Path:
-    """获取 worker 的 memory.md 文件路径"""
-    return _worker_dir(worker_name) / "memory.md"
+# 路径辅助函数已移至 agent_paths.py，保持向后兼容
+from secretary.agent_paths import (
+    _worker_dir,
+    _worker_tasks_dir,
+    _worker_assigned_dir,
+    _worker_ongoing_dir,
+    _worker_logs_dir,
+    _worker_stats_dir,
+    _worker_reports_dir,
+    _worker_memory_file,
+)
 
 
 def load_agent_memory(agent_name: str) -> str:
@@ -223,6 +196,7 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         "specialties": [],       # 擅长方向 (由秘书历史推断)
         "status": "idle",        # idle / busy / offline
         "pid": None,             # 运行时填入 scanner 的 PID
+        "executing": False,      # 是否正在执行任务（process_fn 被触发）
     }
     reg["workers"][agent_name] = info
     _save_registry(reg)
@@ -365,13 +339,28 @@ def update_worker_status(worker_name: str, status: str, pid: int | None = None):
         _save_registry(reg)
 
 
+def set_agent_executing(agent_name: str, executing: bool):
+    """设置 agent 的执行状态（是否正在处理任务）"""
+    reg = _load_registry()
+    if agent_name in reg["workers"]:
+        reg["workers"][agent_name]["executing"] = executing
+        _save_registry(reg)
+
+
+def increment_completed_tasks(agent_name: str):
+    """增加 agent 的已完成任务计数（每次触发时调用）"""
+    reg = _load_registry()
+    if agent_name in reg["workers"]:
+        reg["workers"][agent_name]["completed_tasks"] = reg["workers"][agent_name].get("completed_tasks", 0) + 1
+        _save_registry(reg)
+
+
 def record_task_completion(worker_name: str, task_name: str):
-    """记录 agent 完成了一个任务，并更新 worker 的 memory.md"""
+    """记录 agent 完成了一个任务，并更新 worker 的 memory.md（保留用于向后兼容）"""
     reg = _load_registry()
     if worker_name not in reg["workers"]:
         return
     w = reg["workers"][worker_name]
-    w["completed_tasks"] = w.get("completed_tasks", 0) + 1
     recent = w.get("recent_tasks", [])
     recent.append(task_name)
     w["recent_tasks"] = recent[-20:]  # 只保留最近 20 条
@@ -401,12 +390,12 @@ def _update_worker_memory(worker_name: str, task_name: str):
         
         # 更新基本信息中的路径（如果路径不正确）
         if f"`{worker_dir}`" not in content or f"`{tasks_dir}`" not in content:
-            # 更新工作目录
-            content = re.sub(r"- 工作目录: `.*?`", f"- 工作目录: `{worker_dir}`", content)
+            # 更新工作目录（使用 lambda 避免 Windows 路径中的反斜杠被解释为转义序列）
+            content = re.sub(r"- 工作目录: `.*?`", lambda m: f"- 工作目录: `{worker_dir}`", content)
             # 更新任务目录
-            content = re.sub(r"- 任务目录: `.*?`", f"- 任务目录: `{tasks_dir}`", content)
+            content = re.sub(r"- 任务目录: `.*?`", lambda m: f"- 任务目录: `{tasks_dir}`", content)
             # 更新执行目录
-            content = re.sub(r"- 执行目录: `.*?`", f"- 执行目录: `{ongoing_dir}`", content)
+            content = re.sub(r"- 执行目录: `.*?`", lambda m: f"- 执行目录: `{ongoing_dir}`", content)
     else:
         # 如果不存在，创建基础结构
         worker_dir = _worker_dir(worker_name)
@@ -554,8 +543,9 @@ def pick_available_name(preferred_names: list[str] | None = None) -> str:
 
 def build_workers_summary() -> str:
     """
-    构建 agent 信息摘要 (供秘书 Agent 提示词使用)。
-    包含每个 agent 的名字、目录、擅长方向、已完成任务等。
+    构建 worker 信息摘要 (供秘书 Agent 提示词使用)。
+    只包含 worker 类型的 agent，不包括 secretary、boss、recycler 等其他类型。
+    包含每个 worker 的名字、目录、擅长方向、已完成任务等。
     同时读取每个 worker 的 memory.md 文件内容。
     """
     workers = list_workers()
@@ -564,6 +554,11 @@ def build_workers_summary() -> str:
 
     lines = []
     for w in workers:
+        # 只处理 worker 类型的 agent
+        agent_type = w.get("type", "worker")
+        if agent_type != "worker":
+            continue
+            
         name = w["name"]
         tasks_dir = _worker_tasks_dir(name)
         desc = w.get("description", "") or "通用工人"

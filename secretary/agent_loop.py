@@ -28,12 +28,23 @@ def run_loop(
     log_file: str | None = None,
 ) -> None:
     """
-    通用扫描循环：每轮调用 trigger_fn 取待处理项，对每项调用 process_fn，然后 sleep。
+    通用扫描循环：持续运行直到 KeyboardInterrupt 或 once=True
+    
+    循环模式：
+      1. 检查触发条件 (trigger_fn)
+      2. 执行动作 (process_fn) - 对每个触发项
+      3. 休眠 (interval_sec)
+      4. 重复步骤 1-3
+    
+    关键特性：
+      - 异常不会导致循环退出，只会记录并继续下一轮
+      - 只有 KeyboardInterrupt 或 once=True 才会退出
+      - 每个 process_fn 的异常都被捕获，不会中断循环
 
     - trigger_fn(): 返回待处理项列表，空列表表示本轮无工作。
     - process_fn(item): 处理单条；返回值未使用，仅便于打日志。
     - interval_sec: 每轮结束后的休眠秒数。
-    - once: True 时执行一轮后退出（用于测试或单次拉取）。
+    - once: True 时执行一轮后退出（仅用于测试或单次拉取）。
     - label: 用于日志前缀。
     - verbose: 是否打印周期/异常等信息。
     - on_exit: 正常或 KeyboardInterrupt 退出时调用的回调（如 update_worker_status(idle)）。
@@ -45,15 +56,40 @@ def run_loop(
         while True:
             cycle += 1
             try:
+                # 1. 检查触发条件
                 items = trigger_fn()
                 if not items and on_idle:
                     on_idle()
+                
+                # 2. 执行动作（对每个触发项）
                 for item in items:
-                    process_fn(item)
+                    try:
+                        process_fn(item)
+                    except Exception as e:
+                        # process_fn 中的异常不会导致循环退出
+                        if log_file:
+                            try:
+                                from datetime import datetime
+                                from pathlib import Path
+                                log_path = Path(log_file)
+                                log_path.parent.mkdir(parents=True, exist_ok=True)
+                                with open(log_path, "a", encoding="utf-8") as log_f:
+                                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    log_f.write(f"\n[{ts}] ❌ 处理项异常 (周期 {cycle}): {e}\n")
+                                    traceback.print_exc(file=log_f)
+                                    log_f.flush()
+                            except Exception:
+                                pass
+                        if verbose:
+                            traceback.print_exc()
+                        # 继续处理下一个 item
+                        continue
+                
+                # 3. 如果 once=True，执行一轮后退出（仅用于测试）
                 if once:
                     break
             except Exception as e:
-                # 写入日志文件（如果提供）
+                # trigger_fn 或其他外层异常也不会导致循环退出
                 if log_file:
                     try:
                         from datetime import datetime
@@ -71,6 +107,8 @@ def run_loop(
                 if verbose:
                     traceback.print_exc()
                 # 单轮异常不退出，继续下一轮
+            
+            # 4. 休眠后继续下一轮（除非 once=True）
             if once:
                 break
             time.sleep(interval_sec)

@@ -5,6 +5,8 @@ Agent CLI 调用器
   - tool_call 事件 (文件编辑、shell 命令等)
   - result 事件 (duration_ms)
   - session_id
+
+实时输出时使用 log_formatter 美化 JSON 输出为易读的对话格式。
 """
 import json
 import subprocess
@@ -226,7 +228,6 @@ def run_agent(
 
         cmd.append(prompt)
 
-    env = os.environ.copy()
     start = time.time()
     stats = RoundStats()
 
@@ -262,6 +263,8 @@ def run_agent(
         raw_lines: list[str] = []
         error_lines: list[str] = []  # 收集错误信息
         warning_count = 0
+        json_lines: list[str] = []  # 收集JSON行用于格式化
+        
         while True:
             line = proc.stdout.readline()
             if line == "" and proc.poll() is not None:
@@ -282,22 +285,31 @@ def run_agent(
                 if stripped.startswith("Warning:") and "is not in the list of known options" in stripped:
                     warning_count += 1
                     if verbose:
-                        sys.stdout.write(f"  │ {stripped}\n")
+                        sys.stdout.write(f"  ⚠️  {stripped}\n")
                         sys.stdout.flush()  # 实时刷新
                     continue
                 
-                # 解析 stream-json 事件并输出
-                readable = _parse_stream_event(stripped, stats)
-                if readable:
-                    output_lines.append(readable)
+                # 尝试解析为JSON
+                is_json = False
+                try:
+                    evt = json.loads(stripped)
+                    is_json = True
+                    json_lines.append(stripped)  # 收集JSON行用于格式化
+                    # 解析 stream-json 事件并更新统计（但不输出，等待格式化）
+                    _parse_stream_event(stripped, stats)
+                except json.JSONDecodeError:
+                    # 非JSON行：解析并实时输出
+                    readable = _parse_stream_event(stripped, stats)
+                    if readable:
+                        output_lines.append(readable)
+                    # 实时输出非JSON行
                     if verbose:
-                        sys.stdout.write(f"  │ {readable}\n")
-                        sys.stdout.flush()  # 实时刷新，确保日志及时写入
-                elif stripped and not stripped.startswith("Warning:"):
-                    # 非 JSON 行且不是警告（可能是 agent 的其他输出），也记录
-                    if verbose:
-                        sys.stdout.write(f"  │ {stripped}\n")
-                        sys.stdout.flush()  # 实时刷新
+                        if readable:
+                            sys.stdout.write(f"  │ {readable}\n")
+                            sys.stdout.flush()
+                        elif stripped and not stripped.startswith("Warning:"):
+                            sys.stdout.write(f"  │ {stripped}\n")
+                            sys.stdout.flush()
 
         rc = proc.wait(timeout=timeout)
         dur = time.time() - start
@@ -305,6 +317,17 @@ def run_agent(
         # 如果 stream-json 没给 duration_ms，用本地计时
         if stats.duration_ms == 0:
             stats.duration_ms = int(dur * 1000)
+
+        # 格式化并输出JSON内容（美化输出）
+        if verbose and json_lines:
+            from secretary.log_formatter import format_stream_json_to_conversation
+            json_content = "\n".join(json_lines)
+            formatted = format_stream_json_to_conversation(json_content)
+            if formatted:
+                # 输出格式化的对话内容
+                print()  # 空行分隔
+                print(formatted)
+                print()  # 空行分隔
 
         full_output = "\n".join(output_lines)
         raw_full = "".join(raw_lines)  # 保留原始 stream-json 完整输出
