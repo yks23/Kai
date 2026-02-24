@@ -13,40 +13,39 @@ from secretary.agent_types.secretary import SecretaryAgent
 from secretary.agent_types.boss import BossAgent
 from secretary.agent_types.recycler import RecyclerAgent
 
-# 导入注册表系统
-from secretary.agent_registry import (
-    AgentTypeRegistry,
-    get_agent_type,
-    register_agent_type,
-    list_agent_types,
-    has_agent_type,
-    initialize_registry,
-)
-
 __all__ = [
     "WorkerAgent",
     "SecretaryAgent",
     "BossAgent",
     "RecyclerAgent",
-    # 注册表相关
-    "AgentTypeRegistry",
-    "get_agent_type",
-    "register_agent_type",
-    "list_agent_types",
-    "has_agent_type",
-    "initialize_registry",
 ]
 
-# 自动初始化注册表（延迟初始化，避免循环依赖）
-def _auto_initialize_registry():
-    """自动初始化注册表（延迟执行）"""
-    try:
-        import secretary.config as cfg
-        initialize_registry(cfg.CUSTOM_AGENTS_DIR)
-    except Exception:
-        # 如果初始化失败，不影响其他功能
-        pass
+# 延迟导入注册表系统，避免循环依赖
+def _lazy_import_registry():
+    """延迟导入注册表系统"""
+    from secretary.agent_registry import (
+        AgentTypeRegistry,
+        get_agent_type,
+        register_agent_type,
+        list_agent_types,
+        has_agent_type,
+        initialize_registry,
+    )
+    return {
+        "AgentTypeRegistry": AgentTypeRegistry,
+        "get_agent_type": get_agent_type,
+        "register_agent_type": register_agent_type,
+        "list_agent_types": list_agent_types,
+        "has_agent_type": has_agent_type,
+        "initialize_registry": initialize_registry,
+    }
 
-# 在模块导入时自动初始化（但延迟到实际使用时）
-# 这里不立即调用，而是在首次使用时初始化
+# 提供便捷访问（延迟导入）
+def __getattr__(name):
+    """延迟导入注册表相关函数"""
+    if name in ["AgentTypeRegistry", "get_agent_type", "register_agent_type", 
+                "list_agent_types", "has_agent_type", "initialize_registry"]:
+        registry_module = _lazy_import_registry()
+        return registry_module[name]
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 

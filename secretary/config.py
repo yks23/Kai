@@ -246,6 +246,10 @@ def apply_workspace(ws: Path):
     _self.WORKSPACE = ws_resolved
     _self.BASE_DIR = ws_resolved / "Kai"
     
+    # 更新自定义目录
+    _self.CUSTOM_AGENTS_DIR = _self.BASE_DIR / "custom_agents"
+    _self.CUSTOM_PROMPTS_DIR = _self.BASE_DIR / "custom_prompts"
+    
     # 更新目录配置实例
     _self._dir_config = DirectoryConfig(ws_resolved, _self.BASE_DIR)
     

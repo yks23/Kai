@@ -1040,16 +1040,43 @@ def run_recycler_scanner(once: bool = False, verbose: bool = True, recycler_name
 
 if __name__ == "__main__":
     import argparse
+    from secretary.agent_registry import get_agent_type, initialize_registry, list_agent_types
+    
     parser = argparse.ArgumentParser(description="任务扫描器")
     parser.add_argument("--once", action="store_true", help="只执行一次")
     parser.add_argument("--quiet", action="store_true", help="安静模式")
-    parser.add_argument("--worker", type=str, default=None, help="worker 名称")
-    parser.add_argument("--boss", type=str, default=None, help="boss 名称")
-    parser.add_argument("--recycler", type=str, default=None, help="recycler 名称")
+    parser.add_argument("--worker", type=str, default=None, help="worker 名称（向后兼容）")
+    parser.add_argument("--boss", type=str, default=None, help="boss 名称（向后兼容）")
+    parser.add_argument("--recycler", type=str, default=None, help="recycler 名称（向后兼容）")
+    parser.add_argument("--agent", type=str, default=None, help="agent 名称（通用参数）")
+    parser.add_argument("--type", type=str, default=None, help="agent 类型（通用参数，如 worker, boss, recycler 或自定义类型）")
     args = parser.parse_args()
-    if args.boss:
+    
+    # 确保注册表已初始化
+    try:
+        initialize_registry(cfg.CUSTOM_AGENTS_DIR)
+    except Exception:
+        pass
+    
+    # 优先使用新的通用参数
+    if args.agent and args.type:
+        # 使用通用方式启动
+        agent_type_instance = get_agent_type(args.type)
+        if agent_type_instance is None:
+            available_types = list_agent_types()
+            print(f"❌ 未知的 agent 类型: {args.type}")
+            if available_types:
+                print(f"   可用类型: {', '.join(available_types)}")
+            sys.exit(1)
+        
+        config = agent_type_instance.build_config(cfg.BASE_DIR, args.agent)
+        run_unified_scanner(config, once=args.once, verbose=not args.quiet)
+    elif args.boss:
+        # 向后兼容：Boss
         run_boss_scanner(once=args.once, verbose=not args.quiet, boss_name=args.boss)
     elif args.recycler:
+        # 向后兼容：Recycler
         run_recycler_scanner(once=args.once, verbose=not args.quiet, recycler_name=args.recycler)
     else:
+        # 向后兼容：Worker（默认）
         run_scanner(once=args.once, verbose=not args.quiet, worker_name=args.worker)

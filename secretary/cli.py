@@ -1920,6 +1920,13 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     # 确保目录结构存在
     cfg.ensure_dirs()
     
+    # 初始化 agent 类型注册表（在交互模式启动时自动加载自定义类型）
+    try:
+        from secretary.agent_registry import initialize_registry
+        initialize_registry(cfg.CUSTOM_AGENTS_DIR)
+    except Exception:
+        pass  # 如果初始化失败，不影响其他功能
+    
     # 恢复所有已注册的agent（它们的状态已经在agents.json中）
     from secretary.agents import list_workers
     
@@ -2289,6 +2296,13 @@ def main():
     if args.workspace:
         ws = Path(args.workspace).resolve()
         cfg.apply_workspace(ws)
+    
+    # 初始化 agent 类型注册表（在启动时自动加载自定义类型）
+    try:
+        from secretary.agent_registry import initialize_registry
+        initialize_registry(cfg.CUSTOM_AGENTS_DIR)
+    except Exception:
+        pass  # 如果初始化失败，不影响其他功能
 
     # base / name / model / help 命令不需要 ensure_dirs
     if args.command in ("base", "name", "model", "help"):

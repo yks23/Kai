@@ -1,7 +1,5 @@
-# Kai
-
 ![Kai图标](asset/Kai.png)
-
+# Kai
 基于 **Cursor Agent** 的自动化任务系统：用户用自然语言提交任务，Kai（秘书）负责归类写入，扫描器调度 Worker 执行任务并写报告。CLI 主入口为 **kai**（兼容旧名 **secretary**），支持 Windows、macOS、Linux。
 
 ---
