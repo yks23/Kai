@@ -32,6 +32,11 @@
 
 # 5. 终止处理
 
+## 汇报到 Boss reports 目录
+**必须**将本次生成的任务摘要写入 Boss 自己的 reports 目录：`{boss_reports_dir}`
+- 文件名建议：`boss-task-YYYYMMDD-HHMMSS-report.md`
+- 内容包含：生成了哪个任务、写入路径、与目标的关系等
+
 ## 更新 Memory
 如果生成的任务有价值，你可以选择更新 Memory 文件：
 - 记录生成的任务和推进目标的关系

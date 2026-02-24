@@ -2,9 +2,11 @@
 Secretary Agent 类型定义与执行逻辑
 
 Secretary 负责任务的分类、归并和分配，特点：
-- 触发规则：tasks/ 目录有文件时触发
+- 目录结构：统一的 input_dir (tasks/), processing_dir (ongoing/), output_dir (reports/)
+- 触发规则：input_dir 目录有文件时触发
 - 终止条件：单次执行后终止
-- 处理逻辑：读取任务，调用 run_secretary 处理，移动到 assigned/
+- 处理逻辑：读取任务，调用 run_secretary 处理，将分配结果写入 worker 的 input_dir
+- 会话管理：每次都是新会话（单次执行）
 """
 import shutil
 import traceback
@@ -202,6 +204,8 @@ def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
         goals_section = "\n## 当前全局目标\n" + goals_text + "\n"
     template = load_prompt("secretary.md")
     default_tasks_dir = cfg.AGENTS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"
+    secretary_dir = cfg.AGENTS_DIR / secretary_name
+    reports_dir = secretary_dir / "reports"
     # memory_file_path 已在函数开头定义
     return template.format(
         base_dir=cfg.BASE_DIR,
@@ -213,6 +217,7 @@ def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
         tasks_section=tasks_section,
         goals_section=goals_section,
         user_request=user_request,
+        reports_dir=reports_dir,
     )
 
 
@@ -235,7 +240,7 @@ def run_secretary(user_request: str, verbose: bool = True, secretary_name: str =
     from secretary.settings import get_model
     result = run_agent(
         prompt=prompt,
-        workspace=str(cfg.BASE_DIR),
+        workspace=str(cfg.get_workspace()),
         model=get_model(),
         verbose=verbose,
     )
@@ -269,9 +274,9 @@ class SecretaryAgent(AgentType):
         return AgentConfig(
             name=agent_name,
             base_dir=secretary_dir,
-            tasks_dir=secretary_dir / "tasks",
-            ongoing_dir=secretary_dir / "ongoing",  # secretary不使用ongoing，但保留目录结构
-            reports_dir=None,  # secretary不需要reports目录（它不产生报告，只分配任务）
+            input_dir=secretary_dir / "tasks",
+            processing_dir=secretary_dir / "ongoing",  # secretary不使用ongoing，但保留目录结构
+            output_dir=secretary_dir / "reports",
             logs_dir=secretary_dir / "logs",
             stats_dir=secretary_dir / "stats",
             trigger=TriggerConfig(
@@ -281,7 +286,6 @@ class SecretaryAgent(AgentType):
             termination=TerminationCondition.UNTIL_FILE_DELETED,
             first_round_prompt="secretary.md",
             use_ongoing=False,  # secretary不使用ongoing
-            output_dir=secretary_dir / "assigned",  # secretary使用assigned目录
             log_file=secretary_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),
         )

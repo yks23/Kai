@@ -2,9 +2,11 @@
 Worker Agent 类型定义与执行逻辑
 
 Worker 负责执行编程任务，特点：
-- 触发规则：tasks/ 目录有文件时触发
-- 终止条件：直到 ongoing/ 中的任务文件被删除
+- 目录结构：统一的 input_dir (tasks/), processing_dir (ongoing/), output_dir (reports/)
+- 触发规则：input_dir 目录有文件时触发
+- 终止条件：直到 processing_dir 中的任务文件被删除
 - 处理逻辑：多轮对话，支持续轮和完善阶段
+- 会话管理：第一轮使用完整提示词，后续使用 session_id 续轮
 """
 from pathlib import Path
 from typing import List
@@ -105,9 +107,10 @@ def run_worker_first_round(task_file: Path, workspace: str = "", verbose: bool =
         workspace = _try_parse_workspace(task_file)
     prompt = build_first_round_prompt(task_file, report_dir=report_dir, agent_name=agent_name)
     from secretary.settings import get_model
+    from secretary.config import get_workspace
     return run_agent(
         prompt=prompt,
-        workspace=workspace or str(BASE_DIR),
+        workspace=workspace or str(get_workspace()),
         model=get_model(),
         verbose=verbose,
         continue_session=False,
@@ -122,9 +125,10 @@ def run_worker_continue(task_file: Path, workspace: str = "", verbose: bool = Tr
         workspace = _try_parse_workspace(task_file)
     prompt = build_continue_prompt(task_file, report_dir=report_dir, agent_name=agent_name)
     from secretary.settings import get_model
+    from secretary.config import get_workspace
     return run_agent(
         prompt=prompt,
-        workspace=workspace or str(BASE_DIR),
+        workspace=workspace or str(get_workspace()),
         model=get_model(),
         verbose=verbose,
         session_id=session_id,
@@ -138,9 +142,10 @@ def run_worker_refine(elapsed_sec: float, min_time: int,
     """完善阶段调用 — Agent 已完成任务但最低执行时间未到，使用 session_id 继续优化"""
     prompt = build_refine_prompt(elapsed_sec, min_time, report_dir=report_dir, agent_name=agent_name)
     from secretary.settings import get_model
+    from secretary.config import get_workspace
     return run_agent(
         prompt=prompt,
-        workspace=workspace or str(BASE_DIR),
+        workspace=workspace or str(get_workspace()),
         model=get_model(),
         verbose=verbose,
         session_id=session_id,
@@ -173,9 +178,9 @@ class WorkerAgent(AgentType):
         return AgentConfig(
             name=agent_name,
             base_dir=worker_dir,
-            tasks_dir=worker_dir / "tasks",
-            ongoing_dir=worker_dir / "ongoing",
-            reports_dir=worker_dir / "reports",
+            input_dir=worker_dir / "tasks",
+            processing_dir=worker_dir / "ongoing",
+            output_dir=worker_dir / "reports",
             logs_dir=worker_dir / "logs",
             stats_dir=worker_dir / "stats",
             trigger=TriggerConfig(
@@ -203,20 +208,20 @@ class WorkerAgent(AgentType):
         from datetime import datetime
         import traceback
         
-        # 确保 ongoing 目录存在
-        config.ongoing_dir.mkdir(parents=True, exist_ok=True)
+        # 确保 processing 目录存在
+        config.processing_dir.mkdir(parents=True, exist_ok=True)
         
-        # 将任务文件移动到 ongoing 目录
-        ongoing_file = config.ongoing_dir / task_file.name
+        # 将任务文件移动到 processing 目录
+        ongoing_file = config.processing_dir / task_file.name
         try:
             if task_file.exists():
                 shutil.move(str(task_file), str(ongoing_file))
                 if verbose:
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"\n[{ts}] 📦 任务文件已移动到 ongoing/: {ongoing_file.name}")
+                    print(f"\n[{ts}] 📦 任务文件已移动到 processing/: {ongoing_file.name}")
         except Exception as e:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] ❌ 移动任务文件到 ongoing/ 失败: {task_file.name} | 错误: {e}")
+            print(f"\n[{ts}] ❌ 移动任务文件到 processing/ 失败: {task_file.name} | 错误: {e}")
             traceback.print_exc()
             return
         

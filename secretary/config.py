@@ -1,26 +1,33 @@
 """
 Kai 系统配置
 
-BASE_DIR (工作区) 优先级:
+WORKSPACE (工作区) 优先级:
   1. CLI 参数 --workspace / -w        (最高)
   2. 环境变量 SECRETARY_WORKSPACE
   3. 持久化配置 kai base <path>
   4. 当前工作目录 CWD                   (最低)
+
+BASE_DIR 统一为 WORKSPACE/Kai
 
 PROMPTS_DIR (提示词模板):
   固定指向包内的 prompts/ 目录，随包分发。
 """
 import os
 from pathlib import Path
+from typing import Optional
 
 # ============ 包内路径 (不可配置) ============
 _PACKAGE_DIR = Path(__file__).parent.resolve()
 PROMPTS_DIR = _PACKAGE_DIR / "prompts"          # 提示词模板 (随包分发)
 
 # ============ 工作区路径 (可配置) ============
-def _resolve_base_dir() -> Path:
+# WORKSPACE: 用户指定的工作目录（agent 执行时的工作目录）
+# BASE_DIR: 统一为 WORKSPACE/Kai（系统目录存放位置）
+WORKSPACE: Optional[Path] = None
+
+def _resolve_workspace() -> Path:
     """
-    按优先级确定 BASE_DIR:
+    按优先级确定 WORKSPACE:
       env var > 持久化配置 > CWD
     (CLI --workspace 在 cli.py 中覆盖，优先级最高)
     """
@@ -42,20 +49,116 @@ def _resolve_base_dir() -> Path:
     return Path.cwd().resolve()
 
 
-BASE_DIR = _resolve_base_dir()
+WORKSPACE = _resolve_workspace()
 
+# BASE_DIR 统一为 WORKSPACE/Kai
+BASE_DIR = WORKSPACE / "Kai"
+
+# 自定义目录（用于用户贡献的 agent 类型和提示词）
+CUSTOM_AGENTS_DIR = BASE_DIR / "custom_agents"  # 自定义 agent 类型目录
+CUSTOM_PROMPTS_DIR = BASE_DIR / "custom_prompts"  # 自定义提示词模板目录
+
+# ============ 文件夹配置系统 ============
+class DirectoryConfig:
+    """文件夹配置类，用于管理所有系统目录"""
+    
+    def __init__(self, workspace: Path, base_dir: Path):
+        """
+        初始化目录配置
+        
+        Args:
+            workspace: 工作目录（agent 执行时的工作目录）
+            base_dir: 基础目录（系统目录存放位置，通常是 workspace/Kai）
+        """
+        self.workspace = workspace
+        self.base_dir = base_dir
+        
+        # 系统目录（在 base_dir 下）
+        self.agents_dir = base_dir / "agents"
+        self.skills_dir = base_dir / "skills"
+        self.testcases_dir = base_dir / "testcases"
+        
+        # Agent 相关文件
+        self.agents_file = self.agents_dir / "agents.json"
+    
+    def get_agent_dir(self, agent_name: str) -> Path:
+        """获取指定 agent 的目录"""
+        return self.agents_dir / agent_name
+    
+    def get_agent_input_dir(self, agent_name: str) -> Path:
+        """获取指定 agent 的 input 目录（tasks/）"""
+        return self.get_agent_dir(agent_name) / "tasks"
+    
+    def get_agent_processing_dir(self, agent_name: str) -> Path:
+        """获取指定 agent 的 processing 目录（ongoing/）"""
+        return self.get_agent_dir(agent_name) / "ongoing"
+    
+    def get_agent_output_dir(self, agent_name: str) -> Path:
+        """获取指定 agent 的 output 目录（reports/）"""
+        return self.get_agent_dir(agent_name) / "reports"
+    
+    # 向后兼容的方法
+    def get_agent_tasks_dir(self, agent_name: str) -> Path:
+        """向后兼容：获取指定 agent 的 tasks 目录"""
+        return self.get_agent_input_dir(agent_name)
+    
+    def get_agent_ongoing_dir(self, agent_name: str) -> Path:
+        """向后兼容：获取指定 agent 的 ongoing 目录"""
+        return self.get_agent_processing_dir(agent_name)
+    
+    def get_agent_reports_dir(self, agent_name: str) -> Path:
+        """向后兼容：获取指定 agent 的 reports 目录"""
+        return self.get_agent_output_dir(agent_name)
+    
+    def get_agent_logs_dir(self, agent_name: str) -> Path:
+        """获取指定 agent 的 logs 目录"""
+        return self.get_agent_dir(agent_name) / "logs"
+    
+    def get_agent_stats_dir(self, agent_name: str) -> Path:
+        """获取指定 agent 的 stats 目录"""
+        return self.get_agent_dir(agent_name) / "stats"
+    
+    def ensure_dirs(self):
+        """确保所有系统目录存在"""
+        for d in [self.testcases_dir, self.skills_dir, self.agents_dir]:
+            d.mkdir(parents=True, exist_ok=True)
+        
+        # 为所有已注册的 agent 创建统一的目录结构（tasks/ongoing/reports）
+        try:
+            from secretary.agents import list_workers
+            workers = list_workers()
+            for worker in workers:
+                agent_name = worker.get("name")
+                agent_dir = self.get_agent_dir(agent_name)
+                # 统一的目录结构：tasks/ongoing/reports
+                for d in [
+                    agent_dir,
+                    agent_dir / "tasks",  # input_dir
+                    agent_dir / "ongoing",  # processing_dir
+                    agent_dir / "reports",  # output_dir
+                    agent_dir / "logs",
+                    agent_dir / "stats",
+                ]:
+                    d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+
+# 全局目录配置实例
+_dir_config = DirectoryConfig(WORKSPACE, BASE_DIR)
+
+# ============ 向后兼容的目录变量 ============
 # 注意: 不再使用根目录的 tasks/ 和 ongoing/
 # 所有任务都分配到 agent 目录中 (agents/{name}/tasks 和 agents/{name}/ongoing)
 # 默认 agent 名为 "sen"，当没有指定 agent 时使用
 
 DEFAULT_WORKER_NAME = "sen"  # 默认 agent 名称（保持向后兼容）
 
-SKILLS_DIR = BASE_DIR / "skills"            # 学会的技能 (可复用任务模板)
-AGENTS_DIR = BASE_DIR / "agents"            # Agent 目录 (所有 agent 放在这里)
-AGENTS_FILE = AGENTS_DIR / "agents.json"    # Agent 注册表 (放在 agents/ 目录下)
-
-# 注意：所有 agent 现在都使用 agents/<name>/ 结构
-# 不再需要硬编码 kai 路径
+# 使用目录配置实例的属性
+SKILLS_DIR = _dir_config.skills_dir
+AGENTS_DIR = _dir_config.agents_dir
+AGENTS_FILE = _dir_config.agents_file
+TESTCASES_DIR = _dir_config.testcases_dir
 
 # ============ Agent 配置 ============
 # 直接使用 agent 命令
@@ -84,8 +187,6 @@ EXECUTABLE_TASK_TYPES = ("task", "hire", "recycle")
 
 # ============ 回收者配置 ============
 RECYCLER_INTERVAL = int(os.environ.get("RECYCLER_INTERVAL", "120"))  # 回收者扫描间隔(秒) = 2分钟
-
-TESTCASES_DIR = BASE_DIR / "testcases"  # 测试样例文件夹
 
 # ============ 执行方式与日志 ============
 # 前台执行：task, keep（仅 spawn 子进程后立即返回）, hire, fire, workers, monitor, report, base, name, model, target, help, check（tail -f）, stop, clean-*, skills, learn, forget, use
@@ -119,44 +220,48 @@ BUILTIN_SKILLS = {
 }
 
 
-def apply_base_dir(ws: Path):
-    """运行时切换工作区 (由 CLI --workspace 或 kai base 调用)"""
+def get_workspace() -> Path:
+    """
+    获取 agent 执行时的工作目录（WORKSPACE）
+    """
+    return WORKSPACE
+
+
+def get_dir_config() -> DirectoryConfig:
+    """
+    获取全局目录配置实例
+    """
+    return _dir_config
+
+
+def apply_workspace(ws: Path):
+    """
+    运行时切换工作区 (由 CLI --workspace 或 kai base 调用)
+    
+    Args:
+        ws: 工作目录路径
+    """
     import secretary.config as _self
-    _self.BASE_DIR = ws
-    _self.TESTCASES_DIR = ws / "testcases"
-    _self.SKILLS_DIR = ws / "skills"
-    _self.AGENTS_DIR = ws / "agents"
-    _self.AGENTS_FILE = _self.AGENTS_DIR / "agents.json"
+    ws_resolved = ws.resolve()
+    _self.WORKSPACE = ws_resolved
+    _self.BASE_DIR = ws_resolved / "Kai"
+    
+    # 更新目录配置实例
+    _self._dir_config = DirectoryConfig(ws_resolved, _self.BASE_DIR)
+    
+    # 更新向后兼容的目录变量
+    _self.SKILLS_DIR = _self._dir_config.skills_dir
+    _self.AGENTS_DIR = _self._dir_config.agents_dir
+    _self.AGENTS_FILE = _self._dir_config.agents_file
+    _self.TESTCASES_DIR = _self._dir_config.testcases_dir
+
+
+# 向后兼容：保留 apply_base_dir 作为 apply_workspace 的别名
+def apply_base_dir(ws: Path):
+    """向后兼容函数，实际调用 apply_workspace"""
+    apply_workspace(ws)
 
 
 def ensure_dirs():
-    """确保所有运行时目录存在 (在 CLI 入口处调用)。
-    Kai 目录只在 kai 已注册时才创建，避免未注册时自动创建目录。
-    """
-    for d in [TESTCASES_DIR, SKILLS_DIR, AGENTS_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
-    
-    # 确保 agents 目录存在
-    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # 为所有已注册的 secretary 类型 agent 创建目录（避免未注册时自动创建）
-    # 注意：agent的创建只在交互模式时检查，这里不自动创建
-    try:
-        from secretary.agents import list_workers
-        workers = list_workers()
-        for worker in workers:
-            if worker.get("type") == "secretary":
-                # 为 secretary 类型的 agent 创建目录
-                secretary_name = worker.get("name")
-                secretary_dir = AGENTS_DIR / secretary_name
-                for d in [
-                    secretary_dir,
-                    secretary_dir / "tasks",
-                    secretary_dir / "assigned",
-                    secretary_dir / "logs",
-                    secretary_dir / "stats",
-                ]:
-                    d.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # 如果导入失败或检查失败，不创建目录（避免错误）
-        pass
+    """确保所有运行时目录存在 (在 CLI 入口处调用)"""
+    _dir_config.ensure_dirs()

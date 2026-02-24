@@ -1,10 +1,14 @@
 """
 Boss Agent 类型定义与执行逻辑
 
-Boss 负责监控指定 worker 的任务队列，在队列为空时生成新任务推进目标，特点：
-- 触发规则：监控的 worker 的 tasks/ 和 ongoing/ 都为空时触发（自定义触发函数）
-- 终止条件：单次执行后终止
-- 处理逻辑：调用 run_boss 生成任务并写入 worker 的 tasks/ 目录
+Boss 负责监控指定 worker，生成新任务推进目标，特点：
+- 目录结构：统一的 input_dir (tasks/), processing_dir (ongoing/), output_dir (reports/)
+- 触发规则：
+  1. 自己的 input_dir（全局目标，goal.md）有内容，或
+  2. 监控的 worker 的 output_dir 出现了新的 reports
+- 终止条件：持续运行（UNTIL_FILE_DELETED）
+- 处理逻辑：调用 run_boss 生成任务并写入监控的 worker 的 input_dir
+- 会话管理：每次都是新会话（单次执行）
 """
 import json
 from pathlib import Path
@@ -45,6 +49,48 @@ def _load_boss_worker_name(boss_dir: Path) -> str:
                 if len(parts) > 1:
                     return parts[1].strip()
     return ""
+
+
+def _load_boss_max_executions(boss_dir: Path) -> int | None:
+    """从 boss 目录加载最大执行次数限制"""
+    config_file = boss_dir / "config.md"
+    if config_file.exists():
+        content = config_file.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            if "最大执行次数:" in line or "max_executions:" in line.lower():
+                parts = line.split(":", 1)
+                if len(parts) > 1:
+                    try:
+                        return int(parts[1].strip())
+                    except ValueError:
+                        return None
+    return None
+
+
+def _get_boss_execution_count(boss_dir: Path) -> int:
+    """获取 boss 已执行次数（从 stats 目录统计）"""
+    stats_dir = boss_dir / "stats"
+    if not stats_dir.exists():
+        return 0
+    # 统计 stats 目录中的任务统计文件数量
+    stats_files = list(stats_dir.glob("*-stats.json"))
+    return len(stats_files)
+
+
+def _get_last_processed_report_time(boss_dir: Path) -> float:
+    """获取 boss 最后处理报告的时间戳（从 stats 目录）"""
+    stats_dir = boss_dir / "stats"
+    if not stats_dir.exists():
+        return 0.0
+    
+    # 获取最新的 stats 文件的时间戳
+    stats_files = list(stats_dir.glob("*-stats.json"))
+    if not stats_files:
+        return 0.0
+    
+    # 返回最新文件的时间戳
+    latest_file = max(stats_files, key=lambda p: p.stat().st_mtime)
+    return latest_file.stat().st_mtime
 
 
 def _get_completed_tasks_summary(worker_name: str) -> str:
@@ -114,6 +160,7 @@ def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
         reports_info += "（目录不存在）\n"
     
     boss_name = boss_dir.name
+    boss_reports_dir = boss_dir / "reports"
     from secretary.agents import load_agent_memory, _worker_memory_file
     memory_content = load_agent_memory(boss_name)
     memory_file_path = _worker_memory_file(boss_name)
@@ -130,6 +177,7 @@ def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
         worker_tasks_dir=worker_tasks_dir,
         worker_ongoing_dir=worker_ongoing_dir,
         worker_reports_dir=worker_reports_dir,
+        boss_reports_dir=boss_reports_dir,
         pending_count=pending_count,
         ongoing_count=ongoing_count,
         completed_tasks_summary=completed_tasks_summary,
@@ -167,10 +215,27 @@ def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True) -> bool:
     from secretary.settings import get_model
     result = run_agent(
         prompt=prompt,
-        workspace=str(cfg.BASE_DIR),
+        workspace=str(cfg.get_workspace()),
         model=get_model(),
         verbose=verbose,
     )
+    
+    # 写入 stats 文件以便统计执行次数
+    from datetime import datetime
+    stats_dir = boss_dir / "stats"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    task_name = f"boss-execution-{timestamp}"
+    stats_file = stats_dir / f"{task_name}-stats.json"
+    stats_data = {
+        "task_name": task_name,
+        "success": result.success,
+        "duration": result.duration,
+        "start_time": datetime.now().isoformat(),
+        "worker_name": worker_name,
+    }
+    stats_file.write_text(json.dumps(stats_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    
     if result.success:
         if verbose:
             print(f"\n✅ Boss Agent 完成 (耗时 {result.duration:.1f}s)")
@@ -208,39 +273,61 @@ class BossAgent(AgentType):
         """
         boss_dir = base_dir / "agents" / agent_name
         
-        # Boss使用自定义触发函数（需要动态获取worker目录）
+        # Boss使用自定义触发函数
         def boss_trigger_fn(config: AgentConfig) -> List[Path]:
-            """Boss的触发函数：检查worker的目录是否为空，为空则返回特殊标记触发"""
+            """
+            Boss的触发函数：
+            1. 检查自己的 tasks/（goal.md）是否有内容，或
+            2. 检查监控的 worker 的 reports/ 是否有新的 reports
+            """
             worker_name = _load_boss_worker_name(config.base_dir)
             if not worker_name:
                 return []
             
-            worker_tasks_dir = _worker_tasks_dir(worker_name)
-            worker_ongoing_dir = _worker_ongoing_dir(worker_name)
+            # 检查自己的 tasks/（全局目标，通常是 goal.md）
+            boss_tasks_dir = config.input_dir
+            if boss_tasks_dir.exists():
+                goal_files = list(boss_tasks_dir.glob("*.md"))
+                if goal_files:
+                    # 有自己的任务（全局目标），触发
+                    return [config.base_dir / ".boss_trigger_marker"]
             
-            # 检查worker的tasks/和ongoing/是否为空
-            pending_count = len(list(worker_tasks_dir.glob("*.md"))) if worker_tasks_dir.exists() else 0
-            ongoing_count = len(list(worker_ongoing_dir.glob("*.md"))) if worker_ongoing_dir.exists() else 0
+            # 也检查 goal.md 文件（如果存在）
+            goal_file = config.base_dir / "goal.md"
+            if goal_file.exists() and goal_file.stat().st_size > 0:
+                return [config.base_dir / ".boss_trigger_marker"]
             
-            # 如果worker的队列不为空，不触发
-            if pending_count > 0 or ongoing_count > 0:
-                return []
+            # 检查监控的 worker 的 reports/ 是否有新的 reports
+            worker_reports_dir = _worker_reports_dir(worker_name)
+            if worker_reports_dir.exists():
+                # 获取最近处理的报告文件时间戳（从 stats 目录）
+                last_processed_time = _get_last_processed_report_time(config.base_dir)
+                
+                # 查找新的报告文件
+                report_files = sorted(
+                    worker_reports_dir.glob("*-report.md"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+                
+                for report_file in report_files:
+                    if report_file.stat().st_mtime > last_processed_time:
+                        # 发现新报告，触发
+                        return [config.base_dir / ".boss_trigger_marker"]
             
-            # 如果为空，返回一个特殊标记（使用一个不存在的路径作为标记，不依赖文件）
-            # process_task 会识别这个标记并直接处理，不需要实际文件
-            return [config.base_dir / ".boss_trigger_marker"]
+            return []
         
         return AgentConfig(
             name=agent_name,
             base_dir=boss_dir,
-            tasks_dir=boss_dir / "tasks",
-            ongoing_dir=boss_dir / "ongoing",
-            reports_dir=boss_dir / "reports",
+            input_dir=boss_dir / "tasks",  # Boss 自己的 tasks，用于接收全局目标
+            processing_dir=boss_dir / "ongoing",  # 不使用
+            output_dir=boss_dir / "reports",  # Boss 自己的报告目录
             logs_dir=boss_dir / "logs",
             stats_dir=boss_dir / "stats",
             trigger=TriggerConfig(
                 watch_dirs=[],  # Boss不使用标准目录监视，使用自定义函数
-                condition=TriggerCondition.IS_EMPTY,
+                condition=TriggerCondition.HAS_FILES,
                 create_virtual_file=False,  # 不创建触发文件
                 custom_trigger_fn=boss_trigger_fn,
             ),

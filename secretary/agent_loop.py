@@ -10,10 +10,40 @@ from typing import Callable, Any, List
 
 # 延迟导入避免与 config 等循环依赖
 def load_prompt(template_name: str) -> str:
-    """从 PROMPTS_DIR 加载提示词模板。template_name 如 'secretary.md', 'recycler.md'。"""
+    """
+    加载提示词模板，支持从多个位置加载。
+    
+    优先级：
+    1. {WORKSPACE}/Kai/custom_prompts/ (用户自定义)
+    2. secretary/prompts/ (包内默认)
+    
+    Args:
+        template_name: 模板文件名，如 'secretary.md', 'recycler.md'
+        
+    Returns:
+        模板内容字符串
+        
+    Raises:
+        FileNotFoundError: 如果模板文件不存在
+    """
     import secretary.config as cfg
-    path = cfg.PROMPTS_DIR / template_name
-    return path.read_text(encoding="utf-8")
+    
+    # 优先从自定义目录加载
+    if cfg.CUSTOM_PROMPTS_DIR.exists():
+        custom_path = cfg.CUSTOM_PROMPTS_DIR / template_name
+        if custom_path.exists():
+            return custom_path.read_text(encoding="utf-8")
+    
+    # 回退到包内默认目录
+    default_path = cfg.PROMPTS_DIR / template_name
+    if default_path.exists():
+        return default_path.read_text(encoding="utf-8")
+    
+    # 都不存在，抛出异常
+    raise FileNotFoundError(
+        f"提示词模板 '{template_name}' 未找到。"
+        f"已搜索: {cfg.CUSTOM_PROMPTS_DIR / template_name}, {default_path}"
+    )
 
 
 def run_loop(

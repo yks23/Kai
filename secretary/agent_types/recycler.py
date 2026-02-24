@@ -2,9 +2,11 @@
 Recycler Agent 类型定义与执行逻辑
 
 Recycler 负责审查 Worker 的完成报告，判断任务是否真正完成，特点：
-- 触发规则：扫描所有 agent 的 reports/ 目录，查找 *-report.md 文件（自定义触发函数）
-- 终止条件：单次执行后终止
+- 目录结构：统一的 input_dir (tasks/), processing_dir (ongoing/), output_dir (reports/)
+- 触发规则：扫描所有 agent 的 output_dir 目录，查找 *-report.md 文件（自定义触发函数）
+- 终止条件：持续运行（UNTIL_FILE_DELETED）
 - 处理逻辑：调用 process_report 审查报告，移动到 solved/ 或 unsolved/
+- 会话管理：每次都是新会话（单次执行）
 """
 import shutil
 from pathlib import Path
@@ -74,6 +76,8 @@ def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") ->
     """构建回收者 Agent 的提示词"""
     report_content = report_file.read_text(encoding="utf-8")
     task_name = report_file.stem.replace("-report", "")
+    recycler_dir = AGENTS_DIR / recycler_name
+    recycler_reports_dir = recycler_dir / "reports"
     stats_dir = None
     parts = report_file.parts
     if "agents" in parts and "reports" in parts:
@@ -115,6 +119,7 @@ def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") ->
         memory_section=memory_section,
         memory_file_path=memory_file_path_section,
         reason_filename=reason_filename,
+        recycler_reports_dir=recycler_reports_dir,
     )
 
 
@@ -217,7 +222,7 @@ def process_report(report_file: Path, recycler_config: AgentConfig | None = None
     if verbose:
         print(f"\n🔍 回收者审查: {report_file.name}")
     prompt = build_recycler_prompt(report_file, recycler_name=recycler_name)
-    result = run_agent(prompt=prompt, workspace=str(BASE_DIR), verbose=verbose)
+    result = run_agent(prompt=prompt, workspace=str(cfg.get_workspace()), verbose=verbose)
     if not result.success:
         print(f"   ❌ 回收者 Agent 调用失败: {result.output[:200]}")
         return False
@@ -299,9 +304,9 @@ class RecyclerAgent(AgentType):
         return AgentConfig(
             name=agent_name,
             base_dir=recycler_dir,
-            tasks_dir=recycler_dir / "tasks",
-            ongoing_dir=recycler_dir / "ongoing",
-            reports_dir=recycler_dir / "reports",
+            input_dir=recycler_dir / "tasks",
+            processing_dir=recycler_dir / "ongoing",
+            output_dir=recycler_dir / "reports",
             logs_dir=recycler_dir / "logs",
             stats_dir=recycler_dir / "stats",
             trigger=TriggerConfig(

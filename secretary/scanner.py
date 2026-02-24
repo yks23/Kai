@@ -1,11 +1,19 @@
 """
 统一的任务扫描器 — 所有 agent 使用相同的循环逻辑
 
-所有 agent 都：
-- 放在 agents/<name> 下
-- 包含 tasks/, ongoing/, reports/ 等文件夹（根据类型可能有所不同）
-- 使用统一的触发规则（通过 TriggerConfig 配置）
-- 使用相同的循环逻辑，通过配置区分终止条件和提示词
+所有 agent 都使用统一的目录结构：
+- input_dir (tasks/): 输入目录，由其他 agent 或人类写入任务
+- processing_dir (ongoing/): 处理目录，标识正在处理的任务
+- output_dir (reports/): 输出目录，工作完成后的总结
+
+触发逻辑根据 agent 类型不同：
+- Secretary/Worker: 观察自己的 input_dir 是否有文件
+- Boss: 观察自己的 input_dir（全局目标）或监控的 worker 的 output_dir 是否有新报告
+- Recycler: 扫描所有 agent 的 output_dir 查找报告文件
+
+会话管理：
+- 第一轮：使用完整提示词（角色定义 + 任务）
+- 后续轮次：使用 session_id 续轮，只发送新任务或上下文
 
 注意：具体的 agent 类型定义已移至 secretary/agent_types/ 目录
 
@@ -14,8 +22,8 @@
   任务文件可通过 <!-- execution_scope: monitor --> 等标注类型，未标注时视为 task。
 
 工作流程:
-1. 持续扫描 tasks/ 文件夹（统一触发规则）
-2. 如果有文件，根据配置移动到 ongoing/（如果需要）或直接处理
+1. 持续扫描 input_dir 文件夹（统一触发规则）
+2. 如果有文件，根据配置移动到 processing_dir（如果需要）或直接处理
 3. 根据配置的终止条件和提示词调用 Agent
 4. 根据终止条件判断是否继续（单次执行 vs 直到文件删除）
 5. 完成后写入统计
@@ -414,23 +422,23 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
                     timeout_sec=round_timeout,
                     session_id=task_stats.session_id,  # 使用保存的 session_id
                     agent_name=config.name if config else None,
-                    report_dir=config.reports_dir if config else None,
+                    report_dir=config.output_dir if config else None,
                 )
             elif round_num == 1:
                 # 首轮调用信息已写入日志，这里不再打印
-                report_dir = config.reports_dir if config else None
+                report_dir = config.output_dir if config else None
                 result = run_worker_first_round(ongoing_file, verbose=verbose,
                                                 timeout_sec=round_timeout,
                                                 report_dir=report_dir,
                                                 agent_name=config.name if config else None)
             else:
                 # 续轮调用信息已写入日志，这里不再打印
-                report_dir = config.reports_dir if config else None
+                report_dir = config.output_dir if config else None
                 result = run_worker_continue(ongoing_file, verbose=verbose,
                     agent_name=config.name if config else None,
-                    report_dir=config.reports_dir if config else None,
-                    timeout_sec=round_timeout,
-                    session_id=task_stats.session_id)  # 使用保存的 session_id
+                    report_dir=config.output_dir if config else None,
+                                             timeout_sec=round_timeout,
+                                             session_id=task_stats.session_id)  # 使用保存的 session_id
 
             # 记录本轮统计 + 对话日志
             task_stats.add_round(
@@ -528,8 +536,8 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
 
 
 def _print_report(task_name: str, config: AgentConfig | None = None):
-    """打印报告文件路径（config 或 reports_dir 为空时跳过）"""
-    report_dir = config.reports_dir if config else None
+    """打印报告文件路径（config 或 output_dir 为空时跳过）"""
+    report_dir = config.output_dir if config else None
     if not report_dir:
         return
     expected = report_dir / f"{task_name}-report.md"
@@ -606,14 +614,14 @@ def _get_trigger_debug_info(config: AgentConfig) -> str:
     if all_satisfied:
         # 条件满足，检查是否有可执行文件
         if trigger.condition == TriggerCondition.HAS_FILES:
-            if config.use_ongoing and config.ongoing_dir.exists() and config.ongoing_dir in trigger.watch_dirs:
-                ongoing_files = [f for f in config.ongoing_dir.glob("*.md") if _is_executable_task(f)]
+            if config.use_ongoing and config.processing_dir.exists() and config.processing_dir in trigger.watch_dirs:
+                ongoing_files = [f for f in config.processing_dir.glob("*.md") if _is_executable_task(f)]
                 if ongoing_files:
-                    info_parts.append(f"→ 触发: ongoing目录有 {len(ongoing_files)} 个可执行文件")
+                    info_parts.append(f"→ 触发: processing目录有 {len(ongoing_files)} 个可执行文件")
                     return " | ".join(info_parts)
             
-            if config.tasks_dir in trigger.watch_dirs and config.tasks_dir.exists():
-                all_md = list(config.tasks_dir.glob("*.md"))
+            if config.input_dir in trigger.watch_dirs and config.input_dir.exists():
+                all_md = list(config.input_dir.glob("*.md"))
                 executable = [p for p in all_md if _is_executable_task(p)]
                 non_executable = [p for p in all_md if not _is_executable_task(p)]
                 
@@ -629,7 +637,7 @@ def _get_trigger_debug_info(config: AgentConfig) -> str:
                     info_parts.append(f"文件列表: {', '.join(file_details)}")
                 
                 if executable:
-                    info_parts.append(f"→ 触发: tasks目录有 {len(executable)} 个可执行文件")
+                    info_parts.append(f"→ 触发: input目录有 {len(executable)} 个可执行文件")
                     return " | ".join(info_parts)
                 else:
                     if non_executable:
@@ -637,9 +645,9 @@ def _get_trigger_debug_info(config: AgentConfig) -> str:
                         for f in non_executable[:3]:
                             scope = _get_task_execution_scope(f)
                             non_exec_details.append(f"{f.name}(scope={scope})")
-                        info_parts.append(f"→ 未触发: tasks目录有 {len(all_md)} 个文件但无可执行文件 | 非可执行: {', '.join(non_exec_details)}")
+                        info_parts.append(f"→ 未触发: input目录有 {len(all_md)} 个文件但无可执行文件 | 非可执行: {', '.join(non_exec_details)}")
                     else:
-                        info_parts.append(f"→ 未触发: tasks目录有 {len(all_md)} 个文件但无可执行文件")
+                        info_parts.append(f"→ 未触发: input目录有 {len(all_md)} 个文件但无可执行文件")
             else:
                 info_parts.append("→ 未触发: 条件满足但未找到可执行文件")
         else:
@@ -697,18 +705,18 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
     # 3. 条件满足，返回触发文件
     if trigger.condition == TriggerCondition.HAS_FILES:
         # 有文件时触发：返回文件列表
-        # 优先处理ongoing目录（如果存在且use_ongoing=True）
-        if config.use_ongoing and config.ongoing_dir.exists() and config.ongoing_dir in trigger.watch_dirs:
+        # 优先处理processing目录（如果存在且use_ongoing=True）
+        if config.use_ongoing and config.processing_dir.exists() and config.processing_dir in trigger.watch_dirs:
             candidates = [
-                f for f in sorted(config.ongoing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
+                f for f in sorted(config.processing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
                 if _is_executable_task(f)
             ]
             if candidates:
                 return [candidates[0]]
-        
-        # 从tasks目录取文件
-        if config.tasks_dir in trigger.watch_dirs and config.tasks_dir.exists():
-            all_md = list(config.tasks_dir.glob("*.md"))
+
+        # 从input目录取文件
+        if config.input_dir in trigger.watch_dirs and config.input_dir.exists():
+            all_md = list(config.input_dir.glob("*.md"))
             executable = [p for p in all_md if _is_executable_task(p)]
             
             # 文件检查详情直接输出（用于debug）
@@ -728,7 +736,7 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
         # 从其他监视目录取文件
         result = []
         for watch_dir in trigger.watch_dirs:
-            if watch_dir == config.tasks_dir or watch_dir == config.ongoing_dir:
+            if watch_dir == config.input_dir or watch_dir == config.processing_dir:
                 continue
             if watch_dir.exists():
                 all_md = list(watch_dir.glob("*.md"))
@@ -752,22 +760,66 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
 
 
 def _get_agent_type(config: AgentConfig):
-    """根据配置获取对应的 AgentType 实例"""
-    from secretary.agent_types import WorkerAgent, SecretaryAgent, BossAgent, RecyclerAgent
+    """
+    根据配置获取对应的 AgentType 实例
     
-    # 根据提示词模板判断类型（这是最可靠的方式）
-    if config.first_round_prompt == "worker_first_round.md":
-        return WorkerAgent()
-    elif config.first_round_prompt == "secretary.md":
-        return SecretaryAgent()
-    elif config.first_round_prompt == "boss.md":
-        return BossAgent()
-    elif config.first_round_prompt == "recycler.md":
-        return RecyclerAgent()
-    else:
-        # 向后兼容：根据终止条件推断（但所有 agent 现在都使用 UNTIL_FILE_DELETED）
-        # 如果无法通过提示词判断，默认使用 SecretaryAgent
-        return SecretaryAgent()  # 默认
+    使用注册表动态查找，支持内置类型和自定义类型。
+    优先从 agent 注册信息中获取类型名称，如果不存在则根据提示词模板推断。
+    """
+    from secretary.agent_registry import get_agent_type, initialize_registry, list_agent_types
+    from secretary.agents import get_worker
+    import secretary.config as cfg
+    
+    # 确保注册表已初始化
+    try:
+        initialize_registry(cfg.CUSTOM_AGENTS_DIR)
+    except Exception:
+        pass  # 如果初始化失败，继续尝试使用已注册的类型
+    
+    # 方法1: 从 agent 注册信息中获取类型名称
+    worker_info = get_worker(config.name)
+    if worker_info and worker_info.get("type"):
+        type_name = worker_info["type"]
+        agent_type = get_agent_type(type_name)
+        if agent_type:
+            return agent_type
+    
+    # 方法2: 根据提示词模板推断类型（向后兼容）
+    prompt_to_type = {
+        "worker_first_round.md": "worker",
+        "secretary.md": "secretary",
+        "boss.md": "boss",
+        "recycler.md": "recycler",
+    }
+    
+    type_name = prompt_to_type.get(config.first_round_prompt)
+    if type_name:
+        agent_type = get_agent_type(type_name)
+        if agent_type:
+            return agent_type
+    
+    # 方法3: 尝试直接使用提示词模板名称（去掉 .md 后缀）
+    if config.first_round_prompt.endswith(".md"):
+        type_name = config.first_round_prompt[:-3]
+        # 处理特殊名称（如 worker_first_round -> worker）
+        if type_name.startswith("worker_"):
+            type_name = "worker"
+        agent_type = get_agent_type(type_name)
+        if agent_type:
+            return agent_type
+    
+    # 方法4: 默认使用 worker（向后兼容）
+    default_type = get_agent_type("worker")
+    if default_type:
+        return default_type
+    
+    # 如果所有方法都失败，抛出异常
+    available_types = list_agent_types()
+    raise ValueError(
+        f"无法确定 agent 类型。"
+        f"配置: name={config.name}, prompt={config.first_round_prompt}. "
+        f"可用类型: {', '.join(available_types) if available_types else '无'}"
+    )
 
 
 def _process_one_unified(config: AgentConfig, file_path: Path, verbose: bool) -> None:
@@ -798,18 +850,15 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
     默认持续运行（once=False），除非明确指定 once=True（仅用于测试）。
     """
     # 确保目录存在
-    config.tasks_dir.mkdir(parents=True, exist_ok=True)
+    config.input_dir.mkdir(parents=True, exist_ok=True)
     if config.use_ongoing:
-        config.ongoing_dir.mkdir(parents=True, exist_ok=True)
-    if config.output_dir is not None:
-        config.output_dir.mkdir(parents=True, exist_ok=True)
+        config.processing_dir.mkdir(parents=True, exist_ok=True)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
     if config.log_file is not None:
         config.log_file.parent.mkdir(parents=True, exist_ok=True)
-    if config.reports_dir is not None:
-        config.reports_dir.mkdir(parents=True, exist_ok=True)
     config.stats_dir.mkdir(parents=True, exist_ok=True)
     config.logs_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Recycler需要额外的solved和unsolved目录
     if config.first_round_prompt == "recycler.md":
         recycler_dir = config.base_dir
@@ -831,13 +880,10 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("\n" + "=" * 60)
     print(f"[{ts}] {label} 启动 (PID={_PID})")
-    print(f"   任务目录: {config.tasks_dir}")
+    print(f"   输入目录: {config.input_dir}")
     if config.use_ongoing:
-        print(f"   执行目录: {config.ongoing_dir}")
-    if config.output_dir is not None:
-        print(f"   输出目录: {config.output_dir}")
-    if config.reports_dir:
-        print(f"   报告目录: {config.reports_dir}")
+        print(f"   处理目录: {config.processing_dir}")
+    print(f"   输出目录: {config.output_dir}")
     print(f"   统计目录: {config.stats_dir}")
     print(f"   扫描间隔: {cfg.SCAN_INTERVAL}s")
     print(f"   模式: {'单次' if once else '持续运行（循环直到 Ctrl+C）'}")

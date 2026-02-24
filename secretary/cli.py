@@ -209,9 +209,11 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
     """
     根据agent类型启动对应的scanner进程
     
+    使用注册表动态查找 agent 类型，支持内置类型和自定义类型。
+    
     Args:
         agent_name: agent名称
-        agent_type: agent类型 (secretary/worker/boss/recycler)
+        agent_type: agent类型 (secretary/worker/boss/recycler 或自定义类型)
         silent: 是否静默启动（不打印输出）
     
     Returns:
@@ -221,6 +223,13 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
     import subprocess
     import os
     from secretary.agents import update_worker_status, _worker_logs_dir
+    from secretary.agent_registry import get_agent_type, initialize_registry, list_agent_types
+    
+    # 确保注册表已初始化
+    try:
+        initialize_registry(cfg.CUSTOM_AGENTS_DIR)
+    except Exception:
+        pass  # 如果初始化失败，继续尝试使用已注册的类型
     
     try:
         # 设置环境变量（在所有类型分支之前）
@@ -228,42 +237,38 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
         
-        # 根据类型构建启动命令和配置
+        # 从注册表获取 agent 类型
+        agent_type_instance = get_agent_type(agent_type)
+        
+        if agent_type_instance is None:
+            # 类型未找到，显示错误信息
+            if not silent:
+                available_types = list_agent_types()
+                print(f"⚠️  未知的agent类型: {agent_type}")
+                if available_types:
+                    print(f"   可用类型: {', '.join(available_types)}")
+                else:
+                    print(f"   未找到任何已注册的 agent 类型")
+            return False
+        
+        # 准备日志目录
+        log_dir = _worker_logs_dir(agent_name)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        scanner_log_file = log_dir / "scanner.log"
+        
+        # 根据类型名称构建启动命令
+        # 对于内置类型，使用特定的启动方式（保持向后兼容）
+        # 对于自定义类型，使用统一的 scanner 启动方式
         if agent_type == "secretary":
-            # Secretary 使用 scanner.run_kai_scanner，统一使用 agents/<name>/logs/scanner.log
-            from secretary.agents import _worker_logs_dir
-            log_dir = _worker_logs_dir(agent_name)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            scanner_log_file = log_dir / "scanner.log"
-            # 直接调用 scanner.run_kai_scanner
+            # Secretary 使用 scanner.run_kai_scanner
             sub_cmd = [sys.executable, "-c", f"from secretary.scanner import run_kai_scanner; run_kai_scanner(once=False, verbose=True, secretary_name='{agent_name}')"]
-            
-        elif agent_type == "worker":
-            # Worker 使用 secretary.scanner --worker <name>
-            log_dir = _worker_logs_dir(agent_name)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            scanner_log_file = log_dir / "scanner.log"
-            sub_cmd = [sys.executable, "-m", "secretary.scanner", "--worker", agent_name, "--quiet"]
-            
-        elif agent_type == "boss":
-            # Boss 使用 secretary.scanner --boss <name>
-            log_dir = _worker_logs_dir(agent_name)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            scanner_log_file = log_dir / "scanner.log"
-            sub_cmd = [sys.executable, "-m", "secretary.scanner", "--boss", agent_name, "--quiet"]
-            
         elif agent_type == "recycler":
             # Recycler 使用 secretary.recycler，需要特殊环境变量
-            log_dir = _worker_logs_dir(agent_name)
-            log_dir.mkdir(parents=True, exist_ok=True)
-            scanner_log_file = log_dir / "scanner.log"
             sub_cmd = [sys.executable, "-m", "secretary.recycler"]
             env["KAI_RECYCLE_BACKGROUND"] = "1"
-            
         else:
-            if not silent:
-                print(f"⚠️  未知的agent类型: {agent_type}，跳过启动 {agent_name}")
-            return False
+            # 其他类型（worker, boss 或自定义类型）使用统一的 scanner
+            sub_cmd = [sys.executable, "-m", "secretary.scanner", "--agent", agent_name, "--type", agent_type, "--quiet"]
         
         # 打开日志文件用于重定向输出
         log_file_handle = open(scanner_log_file, "a", encoding="utf-8", buffering=1)
@@ -587,11 +592,28 @@ def cmd_boss(args):
     import subprocess
     import os
     
-    # 解析参数：boss <boss-name> "任务" <worker-name>
-    # args.boss_name, args.goal (列表), args.worker_name
+    # 解析参数：boss <boss-name> task <worker-name> [number]
+    # 新格式：boss name1 task name2 number
     boss_name = args.boss_name
-    goal = " ".join(args.goal) if isinstance(args.goal, list) else args.goal
+    # goal 参数现在应该是固定关键字 "task"，实际目标从 goal.md 读取或使用默认
+    goal_keyword = args.goal  # 应该是 "task"
     worker_name = args.worker_name or cfg.DEFAULT_WORKER_NAME
+    max_executions = args.max_executions  # 执行次数限制，None 表示无限次
+    
+    # 如果 goal_keyword 不是 "task"，将其作为实际目标使用
+    if goal_keyword != "task":
+        goal = goal_keyword
+    else:
+        # 如果用户输入的是 "task"，尝试从已存在的 goal.md 读取，否则使用默认
+        boss_dir = cfg.AGENTS_DIR / boss_name
+        goal_file = boss_dir / "goal.md"
+        if goal_file.exists():
+            goal = goal_file.read_text(encoding="utf-8").strip()
+            # 移除 markdown 标题
+            lines = [l.strip() for l in goal.splitlines() if l.strip() and not l.strip().startswith("#")]
+            goal = "\n".join(lines) if lines else goal
+        else:
+            goal = "推进项目目标"  # 默认目标
     
     # 检查boss_name是否已被使用（且不是boss类型）
     from secretary.agents import register_agent, get_worker
@@ -636,18 +658,21 @@ def cmd_boss(args):
     (boss_dir / "logs").mkdir(parents=True, exist_ok=True)
     (boss_dir / "stats").mkdir(parents=True, exist_ok=True)
     
-    # 写入目标文件
+    # 写入目标文件（如果 goal 不是 "task"，使用用户提供的目标；否则使用默认）
     goal_file = boss_dir / "goal.md"
-    goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
+    if goal != "task" or not goal_file.exists():
+        goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
     
     # 写入配置文件
     config_file = boss_dir / "config.md"
-    config_file.write_text(
+    config_content = (
         f"# Boss配置\n\n"
         f"监控的Worker: {worker_name}\n"
-        f"持续目标: {goal[:100]}...\n",
-        encoding="utf-8"
+        f"持续目标: {goal[:100]}...\n"
     )
+    if max_executions is not None:
+        config_content += f"最大执行次数: {max_executions}\n"
+    config_file.write_text(config_content, encoding="utf-8")
     
     # 注册boss agent（检查是否已被其他类型占用）
     existing_boss_check = get_worker(boss_name)
@@ -1421,39 +1446,33 @@ def cmd_clean_processes(args):
 # ============================================================
 
 def cmd_base(args):
-    """设定或查看工作区目录"""
+    """设定或查看工作区目录（仅当前交互会话生效，不持久化）"""
     name = _cli_name()
 
     if args.path is None:
-        saved = get_base_dir()
-        print(f"\n📁 {name} 工作区配置")
-        if saved:
-            print(f"   已设定: {saved}")
-            p = Path(saved)
-            print(f"   状态:   {'✅ 目录存在' if p.exists() else '❌ 目录不存在'}")
-        else:
-            print(f"   未设定 (使用当前目录 CWD)")
-        print(f"   当前生效: {cfg.BASE_DIR}")
+        print(f"\n📁 {name} 工作区配置（当前会话）")
+        print(f"   当前生效: {cfg.WORKSPACE}")
+        print(f"   系统目录: {cfg.BASE_DIR}")
         print(f"\n   用法:")
         print(f"     {name} base .           设为当前目录")
         print(f"     {name} base /path/to    设为指定路径")
         print(f"     {name} base --clear     清除设定 (回到使用 CWD)")
+        print(f"\n   注意: base 命令仅在当前交互会话中生效，退出后恢复默认。")
         return
 
     if args.path == "--clear":
-        set_base_dir("")
-        print(f"   ✅ 已清除工作区设定，将使用当前目录 (CWD)")
+        # 清除当前会话的工作区设定，回到默认（CWD）
+        default_ws = Path.cwd().resolve()
+        cfg.apply_workspace(default_ws)
+        print(f"   ✅ 已清除工作区设定，当前使用: {default_ws}")
         return
 
     new_path = Path(args.path).resolve()
-    set_base_dir(str(new_path))
-    print(f"\n   ✅ 工作区已设定: {new_path}")
-
-    cfg.apply_base_dir(new_path)
+    cfg.apply_workspace(new_path)
     cfg.ensure_dirs()
-    print(f"   📂 已创建目录结构 (tasks/, assigned/, logs/, skills/ ...)")
-    print(f"\n   之后无论在哪里运行 {name}，都会操作这个目录。")
-    print(f"   如需清除: {name} base --clear")
+    print(f"\n   ✅ 工作区已设定（当前会话）: {new_path}")
+    print(f"   📂 已创建目录结构 (tasks/, ongoing/, reports/, logs/, skills/ ...)")
+    print(f"\n   注意: 此设定仅在当前交互会话中生效，退出后恢复默认。")
 
 
 # ============================================================
@@ -1569,9 +1588,10 @@ def cmd_target(args):
     (boss_dir / "logs").mkdir(parents=True, exist_ok=True)
     (boss_dir / "stats").mkdir(parents=True, exist_ok=True)
     
-    # 写入目标文件
+    # 写入目标文件（如果 goal 不是默认值，使用用户提供的目标）
     goal_file = boss_dir / "goal.md"
-    goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
+    if not goal_file.exists() or goal != "推进项目目标":
+        goal_file.write_text(f"# 持续目标\n\n{goal}\n", encoding="utf-8")
     
     # 写入配置文件
     config_file = boss_dir / "config.md"
@@ -1892,7 +1912,7 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     """无子命令时进入：支持短命令 task/stop/status、exit、monitor。"""
     if initial_args.workspace:
         ws = Path(initial_args.workspace).resolve()
-        cfg.apply_base_dir(ws)
+        cfg.apply_workspace(ws)
 
     name = _cli_name()
     prompt = f"{name}> "
@@ -2139,9 +2159,9 @@ def main():
     # ---- boss ----
     p = subparsers.add_parser("boss", help="👔 创建并启动Boss Agent：监控指定worker，在队列为空时生成新任务")
     p.add_argument("boss_name", help="Boss名称")
-    p.add_argument("goal", nargs="+", help="持续目标描述")
+    p.add_argument("goal", help="持续目标描述（固定关键字 'task'）")
     p.add_argument("worker_name", help="监控的worker名称")
-    p.add_argument("--once", action="store_true", help="只执行一次")
+    p.add_argument("max_executions", type=int, nargs="?", default=None, help="最大执行次数（可选，不指定则无限次）")
     
 
     # ---- use <skill> ----
@@ -2268,7 +2288,7 @@ def main():
     # --workspace 临时覆盖 (不保存)
     if args.workspace:
         ws = Path(args.workspace).resolve()
-        cfg.apply_base_dir(ws)
+        cfg.apply_workspace(ws)
 
     # base / name / model / help 命令不需要 ensure_dirs
     if args.command in ("base", "name", "model", "help"):

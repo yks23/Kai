@@ -53,6 +53,11 @@
    - 移动报告文件到 `{unsolved_dir}/`
    - 创建未完成原因文件 `{reason_filename}`
 
+## 汇报到 Recycler reports 目录
+**必须**将本次审查结果摘要写入 Recycler 自己的 reports 目录：`{recycler_reports_dir}`
+- 文件名建议：`review-<任务名>-report.md`
+- 内容包含：审查结论（已完成/未完成）、简要理由等
+
 ## 更新 Memory
 如果审查判定有价值，更新 Memory 文件：
 - 记录审查标准和判定理由

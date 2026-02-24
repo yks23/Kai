@@ -206,6 +206,7 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
     _worker_logs_dir(agent_name).mkdir(parents=True, exist_ok=True)
     if agent_type == "secretary":
         _worker_assigned_dir(agent_name).mkdir(parents=True, exist_ok=True)
+        _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
     elif agent_type == "worker":
         _worker_ongoing_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
@@ -214,6 +215,7 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         recycler_dir = cfg.AGENTS_DIR / agent_name
         (recycler_dir / "solved").mkdir(parents=True, exist_ok=True)
         (recycler_dir / "unsolved").mkdir(parents=True, exist_ok=True)
+        _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
     elif agent_type == "boss":
         _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_stats_dir(agent_name).mkdir(parents=True, exist_ok=True)

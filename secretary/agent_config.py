@@ -55,16 +55,23 @@ class AgentConfig:
     """
     统一的 Agent 配置
     
-    所有 agent 都使用统一的触发规则配置，
-    但通过配置来区分终止条件和提示词。
+    所有 agent 都使用统一的目录结构（input/processing/output），
+    但通过配置来区分触发逻辑、终止条件和提示词。
+    
+    统一的目录结构：
+    - input_dir (tasks/): 输入目录，由其他 agent 或人类写入任务
+    - processing_dir (ongoing/): 处理目录，标识正在处理的任务
+    - output_dir (reports/): 输出目录，工作完成后的总结
     """
     name: str  # agent 名称
     base_dir: Path  # agent 基础目录 (agents/<name>)
     
-    # 目录结构（统一）
-    tasks_dir: Path  # tasks/ 目录
-    ongoing_dir: Path  # ongoing/ 目录（某些agent可能不需要）
-    reports_dir: Path | None  # reports/ 目录（某些agent可能不需要，如secretary）
+    # 统一的目录结构（新）
+    input_dir: Path  # input 目录 (tasks/)
+    processing_dir: Path  # processing 目录 (ongoing/)
+    output_dir: Path  # output 目录 (reports/)
+    
+    # 其他目录
     logs_dir: Path  # logs/ 目录
     stats_dir: Path  # stats/ 目录
     
@@ -90,11 +97,27 @@ class AgentConfig:
     # 是否需要ongoing目录（有默认值）
     use_ongoing: bool = True  # secretary/boss/recycler不需要ongoing，worker需要
     
-    # 输出目录（某些agent可能需要，如kai的assigned，有默认值）
-    output_dir: Path | None = None
+    # 会话管理（有默认值）
+    session_id: str | None = None  # Cursor TUI 会话号，用于维护记忆和多轮对话
     
     # 日志文件（有默认值）
     log_file: Path | None = None
+    
+    # 向后兼容的属性（通过 @property 实现）
+    @property
+    def tasks_dir(self) -> Path:
+        """向后兼容：tasks_dir 指向 input_dir"""
+        return self.input_dir
+    
+    @property
+    def ongoing_dir(self) -> Path:
+        """向后兼容：ongoing_dir 指向 processing_dir"""
+        return self.processing_dir
+    
+    @property
+    def reports_dir(self) -> Path | None:
+        """向后兼容：reports_dir 指向 output_dir"""
+        return self.output_dir
 
 
 def build_worker_config(base_dir: Path, worker_name: str) -> AgentConfig:

@@ -45,6 +45,11 @@
 
 # 5. 终止处理
 
+## 汇报到秘书 reports 目录
+**必须**将本次分配决策摘要写入秘书自己的 reports 目录：`{reports_dir}`
+- 文件名建议：`assignment-YYYYMMDD-HHMMSS-report.md`（带时间戳）
+- 内容包含：本次请求、分配给了谁、任务文件名、关键决策等
+
 ## 更新 Memory
 如果本次决策有价值，更新 Memory 文件：
 - 记录关键决策和分配理由

@@ -26,14 +26,30 @@ class AgentPaths:
         self.base_dir = cfg.AGENTS_DIR / agent_name
     
     @property
-    def tasks_dir(self) -> Path:
-        """tasks/ 目录"""
+    def input_dir(self) -> Path:
+        """input 目录（tasks/）"""
         return self.base_dir / "tasks"
     
     @property
-    def ongoing_dir(self) -> Path:
-        """ongoing/ 目录"""
+    def processing_dir(self) -> Path:
+        """processing 目录（ongoing/）"""
         return self.base_dir / "ongoing"
+    
+    @property
+    def output_dir(self) -> Path:
+        """output 目录（reports/）"""
+        return self.base_dir / "reports"
+    
+    # 向后兼容的属性
+    @property
+    def tasks_dir(self) -> Path:
+        """向后兼容：tasks_dir 指向 input_dir"""
+        return self.input_dir
+    
+    @property
+    def ongoing_dir(self) -> Path:
+        """向后兼容：ongoing_dir 指向 processing_dir"""
+        return self.processing_dir
     
     @property
     def assigned_dir(self) -> Path:
@@ -42,8 +58,8 @@ class AgentPaths:
     
     @property
     def reports_dir(self) -> Path:
-        """reports/ 目录"""
-        return self.base_dir / "reports"
+        """向后兼容：reports_dir 指向 output_dir"""
+        return self.output_dir
     
     @property
     def logs_dir(self) -> Path:
@@ -87,7 +103,7 @@ def _worker_dir(worker_name: str) -> Path:
 
 def _worker_tasks_dir(worker_name: str) -> Path:
     """获取 worker 的 tasks 目录：agents/<name>/tasks"""
-    return AgentPaths(worker_name).tasks_dir
+    return AgentPaths(worker_name).input_dir
 
 
 def _worker_assigned_dir(worker_name: str) -> Path:
@@ -97,7 +113,7 @@ def _worker_assigned_dir(worker_name: str) -> Path:
 
 def _worker_ongoing_dir(worker_name: str) -> Path:
     """获取 worker 的 ongoing 目录：agents/<name>/ongoing"""
-    return AgentPaths(worker_name).ongoing_dir
+    return AgentPaths(worker_name).processing_dir
 
 
 def _worker_logs_dir(worker_name: str) -> Path:
@@ -112,7 +128,7 @@ def _worker_stats_dir(worker_name: str) -> Path:
 
 def _worker_reports_dir(worker_name: str) -> Path:
     """获取 worker 的 reports 目录路径：agents/<name>/reports"""
-    return AgentPaths(worker_name).reports_dir
+    return AgentPaths(worker_name).output_dir
 
 
 def _worker_memory_file(worker_name: str) -> Path:
