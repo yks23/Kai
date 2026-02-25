@@ -109,57 +109,6 @@ def load_agent_memory(agent_name: str) -> str:
     return ""
 
 
-def update_agent_memory(agent_name: str, summary: str, task_name: str | None = None):
-    """
-    更新agent的memory文件（通用函数，适用于所有agent类型）
-    
-    Args:
-        agent_name: agent名称
-        summary: 本次工作的简要总结
-        task_name: 任务名称（可选，用于记录）
-    """
-    memory_file = _worker_memory_file(agent_name)
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    # 读取现有内容或创建新文件
-    if memory_file.exists():
-        content = memory_file.read_text(encoding="utf-8")
-    else:
-        # 创建基础结构
-        agent_dir = _worker_dir(agent_name)
-        content = (
-            f"# {agent_name} 的工作总结\n\n"
-            f"## 基本信息\n"
-            f"- 工作目录: `{agent_dir}`\n"
-            f"- 创建时间: {timestamp}\n\n"
-            f"## 工作总结\n\n"
-        )
-    
-    # 在"工作总结"部分追加新条目
-    if task_name:
-        new_entry = f"\n### [{timestamp}] 完成任务: {task_name}\n{summary}\n"
-    else:
-        new_entry = f"\n### [{timestamp}] 工作记录\n{summary}\n"
-    
-    # 查找"工作总结"部分的位置并插入新条目
-    if "## 工作总结" in content:
-        # 在"工作总结"标题后插入新条目（最新任务在最前面）
-        parts = content.split("## 工作总结", 1)
-        if len(parts) == 2:
-            header = parts[0] + "## 工作总结"
-            summary_section = parts[1].lstrip()
-            # 移除末尾的提示文字（如果存在）
-            if summary_section.startswith("（此文件由系统自动维护"):
-                summary_section = ""
-            content = header + "\n\n" + new_entry + (summary_section if summary_section else "")
-        else:
-            content += new_entry + "\n"
-    else:
-        # 如果没有"工作总结"部分，添加
-        content += "\n## 工作总结\n\n" + new_entry + "\n"
-    
-    memory_file.write_text(content, encoding="utf-8")
-
 
 # ============================================================
 #  CRUD
@@ -220,55 +169,33 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_stats_dir(agent_name).mkdir(parents=True, exist_ok=True)
     
-    # 初始化 memory.md（如果不存在，为所有agent类型创建）
+    # 初始化 memory.md（如果不存在）
     memory_file = _worker_memory_file(agent_name)
     if not memory_file.exists():
         agent_dir = _worker_dir(agent_name)
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        extra_lines = ""
         if agent_type == "worker":
-            tasks_dir = _worker_tasks_dir(agent_name)
-            ongoing_dir = _worker_ongoing_dir(agent_name)
-            memory_file.write_text(
-                f"# {agent_name} 的工作总结\n\n"
-                f"## 基本信息\n"
-                f"- 工作目录: `{agent_dir}`\n"
-                f"- 任务目录: `{tasks_dir}`\n"
-                f"- 执行目录: `{ongoing_dir}`\n"
-                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"- **统计**: 已完成 0 个任务 | 待处理 0 个 | 执行中 0 个\n\n"
-                f"## 工作总结\n\n"
-                f"（此文件由系统自动维护，记录 {agent_name} 的工作历史和状态）\n",
-                encoding="utf-8"
+            extra_lines = (
+                f"- 任务目录: `{_worker_tasks_dir(agent_name)}`\n"
+                f"- 执行目录: `{_worker_ongoing_dir(agent_name)}`\n"
             )
-        elif agent_type == "secretary":
-            memory_file.write_text(
-                f"# {agent_name} 的工作总结\n\n"
-                f"## 基本信息\n"
-                f"- 工作目录: `{agent_dir}`\n"
-                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"## 工作总结\n\n"
-                f"（此文件由系统自动维护，记录 {agent_name} 的任务分配历史）\n",
-                encoding="utf-8"
-            )
-        elif agent_type == "boss":
-            memory_file.write_text(
-                f"# {agent_name} 的工作总结\n\n"
-                f"## 基本信息\n"
-                f"- 工作目录: `{agent_dir}`\n"
-                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"## 工作总结\n\n"
-                f"（此文件由系统自动维护，记录 {agent_name} 的任务生成历史）\n",
-                encoding="utf-8"
-            )
-        elif agent_type == "recycler":
-            memory_file.write_text(
-                f"# {agent_name} 的工作总结\n\n"
-                f"## 基本信息\n"
-                f"- 工作目录: `{agent_dir}`\n"
-                f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"## 工作总结\n\n"
-                f"（此文件由系统自动维护，记录 {agent_name} 的报告审查历史）\n",
-                encoding="utf-8"
-            )
+        history_label = {
+            "worker": "工作历史和状态",
+            "secretary": "任务分配历史",
+            "boss": "任务生成历史",
+            "recycler": "报告审查历史",
+        }.get(agent_type, "工作历史")
+        memory_file.write_text(
+            f"# {agent_name} 的工作总结\n\n"
+            f"## 基本信息\n"
+            f"- 工作目录: `{agent_dir}`\n"
+            f"{extra_lines}"
+            f"- 创建时间: {now_str}\n\n"
+            f"## 工作总结\n\n"
+            f"（此文件由系统自动维护，记录 {agent_name} 的{history_label}）\n",
+            encoding="utf-8"
+        )
 
     return info
 
@@ -375,91 +302,32 @@ def record_task_completion(worker_name: str, task_name: str):
 def _update_worker_memory(worker_name: str, task_name: str):
     """更新 worker 的 memory.md，记录完成的任务"""
     memory_file = _worker_memory_file(worker_name)
-    
-    # 读取现有内容或创建新文件
+
     if memory_file.exists():
         content = memory_file.read_text(encoding="utf-8")
-        # 如果标题或基本信息中的 worker_name 不正确，更新它们
-        worker_dir = _worker_dir(worker_name)
-        tasks_dir = _worker_tasks_dir(worker_name)
-        ongoing_dir = _worker_ongoing_dir(worker_name)
-        
-        # 更新标题（如果还是旧的）
-        import re
-        if content.startswith("# ") and worker_name not in content.split("\n")[0]:
-            # 替换标题
-            content = re.sub(r"^# .* 的工作总结", f"# {worker_name} 的工作总结", content)
-        
-        # 更新基本信息中的路径（如果路径不正确）
-        if f"`{worker_dir}`" not in content or f"`{tasks_dir}`" not in content:
-            # 更新工作目录（使用 lambda 避免 Windows 路径中的反斜杠被解释为转义序列）
-            content = re.sub(r"- 工作目录: `.*?`", lambda m: f"- 工作目录: `{worker_dir}`", content)
-            # 更新任务目录
-            content = re.sub(r"- 任务目录: `.*?`", lambda m: f"- 任务目录: `{tasks_dir}`", content)
-            # 更新执行目录
-            content = re.sub(r"- 执行目录: `.*?`", lambda m: f"- 执行目录: `{ongoing_dir}`", content)
     else:
-        # 如果不存在，创建基础结构
         worker_dir = _worker_dir(worker_name)
-        tasks_dir = _worker_tasks_dir(worker_name)
-        ongoing_dir = _worker_ongoing_dir(worker_name)
         content = (
             f"# {worker_name} 的工作总结\n\n"
             f"## 基本信息\n"
             f"- 工作目录: `{worker_dir}`\n"
-            f"- 任务目录: `{tasks_dir}`\n"
-            f"- 执行目录: `{ongoing_dir}`\n"
             f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
             f"## 工作总结\n\n"
         )
-    
-    # 更新统计信息（从注册表读取最新数据）
-    reg = _load_registry()
-    completed = 0
-    pending = 0
-    ongoing = 0
-    if worker_name in reg["workers"]:
-        w = reg["workers"][worker_name]
-        completed = w.get("completed_tasks", 0)
-        # 实时统计
-        pending = len(list(_worker_tasks_dir(worker_name).glob("*.md"))) if _worker_tasks_dir(worker_name).exists() else 0
-        ongoing = len(list(_worker_ongoing_dir(worker_name).glob("*.md"))) if _worker_ongoing_dir(worker_name).exists() else 0
-    
-    # 更新基本信息部分的统计
-    import re
-    stats_line = f"- **统计**: 已完成 {completed} 个任务 | 待处理 {pending} 个 | 执行中 {ongoing} 个"
-    if "- **统计**:" in content:
-        content = re.sub(r"- \*\*统计\*\*:.*", stats_line, content)
-    elif "## 基本信息" in content:
-        # 在基本信息部分末尾添加统计
-        content = re.sub(
-            r"(## 基本信息\n.*?)(\n\n## )",
-            r"\1\n" + stats_line + r"\2",
-            content,
-            flags=re.DOTALL
-        )
-    
-    # 在"工作总结"部分追加新完成的任务
+
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     new_entry = f"\n### [{timestamp}] 完成任务: {task_name}\n"
-    
-    # 查找"工作总结"部分的位置并插入新条目
+
     if "## 工作总结" in content:
-        # 在"工作总结"标题后插入新条目（最新任务在最前面）
         parts = content.split("## 工作总结", 1)
-        if len(parts) == 2:
-            header = parts[0] + "## 工作总结"
-            summary = parts[1].lstrip()
-            # 移除末尾的提示文字（如果存在）
-            if summary.startswith("（此文件由系统自动维护"):
-                summary = ""
-            content = header + "\n\n" + new_entry + (summary if summary else "")
-        else:
-            content += new_entry + "\n"
+        header = parts[0] + "## 工作总结"
+        rest = parts[1].lstrip() if len(parts) == 2 else ""
+        if rest.startswith("（此文件由系统自动维护"):
+            rest = ""
+        content = header + "\n\n" + new_entry + rest
     else:
-        # 如果没有"工作总结"部分，添加
         content += "\n## 工作总结\n\n" + new_entry + "\n"
-    
+
     memory_file.write_text(content, encoding="utf-8")
 
 
@@ -482,18 +350,34 @@ def get_all_running_pids() -> list[tuple[str, int]]:
 
 def stop_all_agents():
     """停止所有运行中的agent进程（用于退出kai时清理）"""
-    from secretary.cli import _stop_process, _check_process_exists
+    import os
+    import signal
+    import sys as _sys
+
     running = get_all_running_pids()
     if not running:
         return
-    
-    print(f"\n🛑 停止所有运行中的agent进程...")
+
+    print("\n🛑 停止所有运行中的agent进程...")
     for name, pid in running:
-        if _check_process_exists(pid):
-            print(f"   停止 {name} (PID={pid})...")
-            _stop_process(pid, name)
+        try:
+            os.kill(pid, 0)  # 检查进程是否存在
+        except (OSError, ProcessLookupError):
             update_worker_status(name, "idle", pid=None)
-    print(f"✅ 所有agent进程已停止")
+            continue
+
+        print(f"   停止 {name} (PID={pid})...")
+        try:
+            if _sys.platform == "win32":
+                import subprocess
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=10)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+        update_worker_status(name, "idle", pid=None)
+    print("✅ 所有agent进程已停止")
 
 
 def pick_random_name() -> str:
