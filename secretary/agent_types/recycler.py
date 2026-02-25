@@ -99,13 +99,8 @@ def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") ->
         stats_section = "(无统计数据；此任务在统计功能上线前完成)\n"
     solved_dir, unsolved_dir = _get_recycler_dirs(recycler_name)
     reason_filename = f"{task_name}-unsolved-reason.md"
-    from secretary.agents import load_agent_memory, _worker_memory_file
-    memory_content = load_agent_memory(recycler_name)
+    from secretary.agents import _worker_memory_file
     memory_file_path = _worker_memory_file(recycler_name)
-    memory_section = ""
-    if memory_content:
-        memory_section = "\n## 你的工作历史（Memory）\n" + memory_content + "\n"
-    memory_file_path_section = f"`{memory_file_path}`" if memory_file_path else "未提供"
     template = load_prompt("recycler.md")
     return template.format(
         base_dir=BASE_DIR,
@@ -114,9 +109,6 @@ def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") ->
         stats_section=stats_section,
         solved_dir=solved_dir,
         unsolved_dir=unsolved_dir,
-        stats_md=stats_md,
-        stats_json=stats_json,
-        memory_section=memory_section,
         memory_file_path=memory_file_path_section,
         reason_filename=reason_filename,
         recycler_reports_dir=recycler_reports_dir,
@@ -251,8 +243,9 @@ def process_report(report_file: Path, recycler_config: AgentConfig | None = None
 
 def run_recycler(once: bool = False, verbose: bool = True, recycler_name: str = "recycler") -> None:
     """运行回收者主循环（供 CLI 调用）。"""
-    from secretary.agent_config import build_recycler_config
-    config = build_recycler_config(cfg.BASE_DIR, recycler_name)
+    from secretary.agent_registry import get_agent_type
+    recycler_type = get_agent_type("recycler")
+    config = recycler_type.build_config(cfg.BASE_DIR, recycler_name)
 
     def trigger_fn():
         return _find_report_files()

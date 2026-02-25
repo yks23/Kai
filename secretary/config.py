@@ -58,107 +58,14 @@ BASE_DIR = WORKSPACE / "Kai"
 CUSTOM_AGENTS_DIR = BASE_DIR / "custom_agents"  # 自定义 agent 类型目录
 CUSTOM_PROMPTS_DIR = BASE_DIR / "custom_prompts"  # 自定义提示词模板目录
 
-# ============ 文件夹配置系统 ============
-class DirectoryConfig:
-    """文件夹配置类，用于管理所有系统目录"""
-    
-    def __init__(self, workspace: Path, base_dir: Path):
-        """
-        初始化目录配置
-        
-        Args:
-            workspace: 工作目录（agent 执行时的工作目录）
-            base_dir: 基础目录（系统目录存放位置，通常是 workspace/Kai）
-        """
-        self.workspace = workspace
-        self.base_dir = base_dir
-        
-        # 系统目录（在 base_dir 下）
-        self.agents_dir = base_dir / "agents"
-        self.skills_dir = base_dir / "skills"
-        self.testcases_dir = base_dir / "testcases"
-        
-        # Agent 相关文件
-        self.agents_file = self.agents_dir / "agents.json"
-    
-    def get_agent_dir(self, agent_name: str) -> Path:
-        """获取指定 agent 的目录"""
-        return self.agents_dir / agent_name
-    
-    def get_agent_input_dir(self, agent_name: str) -> Path:
-        """获取指定 agent 的 input 目录（tasks/）"""
-        return self.get_agent_dir(agent_name) / "tasks"
-    
-    def get_agent_processing_dir(self, agent_name: str) -> Path:
-        """获取指定 agent 的 processing 目录（ongoing/）"""
-        return self.get_agent_dir(agent_name) / "ongoing"
-    
-    def get_agent_output_dir(self, agent_name: str) -> Path:
-        """获取指定 agent 的 output 目录（reports/）"""
-        return self.get_agent_dir(agent_name) / "reports"
-    
-    # 向后兼容的方法
-    def get_agent_tasks_dir(self, agent_name: str) -> Path:
-        """向后兼容：获取指定 agent 的 tasks 目录"""
-        return self.get_agent_input_dir(agent_name)
-    
-    def get_agent_ongoing_dir(self, agent_name: str) -> Path:
-        """向后兼容：获取指定 agent 的 ongoing 目录"""
-        return self.get_agent_processing_dir(agent_name)
-    
-    def get_agent_reports_dir(self, agent_name: str) -> Path:
-        """向后兼容：获取指定 agent 的 reports 目录"""
-        return self.get_agent_output_dir(agent_name)
-    
-    def get_agent_logs_dir(self, agent_name: str) -> Path:
-        """获取指定 agent 的 logs 目录"""
-        return self.get_agent_dir(agent_name) / "logs"
-    
-    def get_agent_stats_dir(self, agent_name: str) -> Path:
-        """获取指定 agent 的 stats 目录"""
-        return self.get_agent_dir(agent_name) / "stats"
-    
-    def ensure_dirs(self):
-        """确保所有系统目录存在"""
-        for d in [self.testcases_dir, self.skills_dir, self.agents_dir]:
-            d.mkdir(parents=True, exist_ok=True)
-        
-        # 为所有已注册的 agent 创建统一的目录结构（tasks/ongoing/reports）
-        try:
-            from secretary.agents import list_workers
-            workers = list_workers()
-            for worker in workers:
-                agent_name = worker.get("name")
-                agent_dir = self.get_agent_dir(agent_name)
-                # 统一的目录结构：tasks/ongoing/reports
-                for d in [
-                    agent_dir,
-                    agent_dir / "tasks",  # input_dir
-                    agent_dir / "ongoing",  # processing_dir
-                    agent_dir / "reports",  # output_dir
-                    agent_dir / "logs",
-                    agent_dir / "stats",
-                ]:
-                    d.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-
-
-# 全局目录配置实例
-_dir_config = DirectoryConfig(WORKSPACE, BASE_DIR)
-
-# ============ 向后兼容的目录变量 ============
-# 注意: 不再使用根目录的 tasks/ 和 ongoing/
-# 所有任务都分配到 agent 目录中 (agents/{name}/tasks 和 agents/{name}/ongoing)
-# 默认 agent 名为 "sen"，当没有指定 agent 时使用
+# ============ 系统目录 ============
 
 DEFAULT_WORKER_NAME = "sen"  # 默认 agent 名称（保持向后兼容）
 
-# 使用目录配置实例的属性
-SKILLS_DIR = _dir_config.skills_dir
-AGENTS_DIR = _dir_config.agents_dir
-AGENTS_FILE = _dir_config.agents_file
-TESTCASES_DIR = _dir_config.testcases_dir
+AGENTS_DIR = BASE_DIR / "agents"
+SKILLS_DIR = BASE_DIR / "skills"
+TESTCASES_DIR = BASE_DIR / "testcases"
+AGENTS_FILE = AGENTS_DIR / "agents.json"
 
 # ============ Agent 配置 ============
 # 直接使用 agent 命令
@@ -227,45 +134,29 @@ def get_workspace() -> Path:
     return WORKSPACE
 
 
-def get_dir_config() -> DirectoryConfig:
-    """
-    获取全局目录配置实例
-    """
-    return _dir_config
-
-
 def apply_workspace(ws: Path):
-    """
-    运行时切换工作区 (由 CLI --workspace 或 kai base 调用)
-    
-    Args:
-        ws: 工作目录路径
-    """
+    """运行时切换工作区 (由 CLI --workspace 或 kai base 调用)"""
     import secretary.config as _self
     ws_resolved = ws.resolve()
     _self.WORKSPACE = ws_resolved
     _self.BASE_DIR = ws_resolved / "Kai"
-    
-    # 更新自定义目录
     _self.CUSTOM_AGENTS_DIR = _self.BASE_DIR / "custom_agents"
     _self.CUSTOM_PROMPTS_DIR = _self.BASE_DIR / "custom_prompts"
-    
-    # 更新目录配置实例
-    _self._dir_config = DirectoryConfig(ws_resolved, _self.BASE_DIR)
-    
-    # 更新向后兼容的目录变量
-    _self.SKILLS_DIR = _self._dir_config.skills_dir
-    _self.AGENTS_DIR = _self._dir_config.agents_dir
-    _self.AGENTS_FILE = _self._dir_config.agents_file
-    _self.TESTCASES_DIR = _self._dir_config.testcases_dir
-
-
-# 向后兼容：保留 apply_base_dir 作为 apply_workspace 的别名
-def apply_base_dir(ws: Path):
-    """向后兼容函数，实际调用 apply_workspace"""
-    apply_workspace(ws)
+    _self.AGENTS_DIR = _self.BASE_DIR / "agents"
+    _self.SKILLS_DIR = _self.BASE_DIR / "skills"
+    _self.TESTCASES_DIR = _self.BASE_DIR / "testcases"
+    _self.AGENTS_FILE = _self.AGENTS_DIR / "agents.json"
 
 
 def ensure_dirs():
-    """确保所有运行时目录存在 (在 CLI 入口处调用)"""
-    _dir_config.ensure_dirs()
+    """确保所有运行时目录存在"""
+    for d in [TESTCASES_DIR, SKILLS_DIR, AGENTS_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+    try:
+        from secretary.agents import list_workers
+        for worker in list_workers():
+            agent_dir = AGENTS_DIR / worker.get("name", "")
+            for sub in ("tasks", "ongoing", "reports", "logs", "stats"):
+                (agent_dir / sub).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass

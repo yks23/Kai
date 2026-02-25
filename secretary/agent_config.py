@@ -11,7 +11,7 @@
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal, List
+from typing import Callable, List
 from enum import Enum
 
 
@@ -85,11 +85,8 @@ class AgentConfig:
     trigger: TriggerConfig = field(default_factory=lambda: TriggerConfig())
     
     # 续轮和完善阶段提示词（有默认值）
-    continue_prompt: str | None = None  # 续轮提示词模板（如果需要）
-    refine_prompt: str | None = None  # 完善阶段提示词模板（如果需要）
-    
-    # 处理函数（有默认值）
-    process_fn: Callable[[Path], any] | None = None  # 自定义处理函数（如果为None，使用默认逻辑）
+    continue_prompt: str | None = None
+    refine_prompt: str | None = None
     
     # 标签（用于日志，有默认值）
     label: str = ""
@@ -102,41 +99,6 @@ class AgentConfig:
     
     # 日志文件（有默认值）
     log_file: Path | None = None
-    
-    # 向后兼容的属性（通过 @property 实现）
-    @property
-    def tasks_dir(self) -> Path:
-        """向后兼容：tasks_dir 指向 input_dir"""
-        return self.input_dir
-    
-    @property
-    def ongoing_dir(self) -> Path:
-        """向后兼容：ongoing_dir 指向 processing_dir"""
-        return self.processing_dir
-    
-    @property
-    def reports_dir(self) -> Path | None:
-        """向后兼容：reports_dir 指向 output_dir"""
-        return self.output_dir
 
 
-def build_worker_config(base_dir: Path, worker_name: str) -> AgentConfig:
-    """构建 Worker 的配置（使用集中化定义）"""
-    from secretary.agent_types import WorkerAgent
-    agent_type = WorkerAgent()
-    return agent_type.build_config(base_dir, worker_name)
-
-
-def build_boss_config(base_dir: Path, boss_name: str) -> AgentConfig:
-    """构建 Boss 的配置（使用集中化定义）"""
-    from secretary.agent_types import BossAgent
-    agent_type = BossAgent()
-    return agent_type.build_config(base_dir, boss_name)
-
-
-def build_recycler_config(base_dir: Path, recycler_name: str = "recycler") -> AgentConfig:
-    """构建 Recycler 的配置（使用集中化定义）"""
-    from secretary.agent_types import RecyclerAgent
-    agent_type = RecyclerAgent()
-    return agent_type.build_config(base_dir, recycler_name)
 

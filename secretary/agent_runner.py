@@ -244,17 +244,17 @@ def run_agent(
         print(f"  📝 完整命令: {cmd_str}")
 
     try:
-        # 设置环境变量，确保输出使用 UTF-8 编码
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
-            errors="replace",  # 遇到编码错误时替换而不是失败
+            errors="replace",
             env=env,
             cwd=workspace or None,
         )

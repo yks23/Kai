@@ -9,164 +9,98 @@ from typing import Optional
 
 
 def format_stream_json_to_conversation(raw_json: str) -> str:
-    """
-    将流式 JSON 输出转换为可读的对话格式
-    
-    Args:
-        raw_json: 原始的 stream-json 输出（多行 JSON，每行一个事件）
-    
-    Returns:
-        格式化的对话文本
-    """
+    """将流式 JSON 输出转换为可读的对话格式"""
     if not raw_json or not raw_json.strip():
         return ""
-    
-    lines = []
-    current_assistant_text = []
-    current_tool_calls = []
-    
-    for line in raw_json.splitlines():
-        line = line.strip()
-        if not line:
+
+    lines: list[str] = []
+    assistant_parts: list[str] = []
+    tool_calls: list[str] = []
+
+    _TOOL_ICONS = {
+        "shellToolCall":      ("🔧", "command"),
+        "editToolCall":       ("✏️ ", "filePath"),
+        "writeToolCall":      ("📝", "filePath"),
+        "createFileToolCall": ("📝", "filePath"),
+        "readFileToolCall":   ("📖", "filePath"),
+        "grepToolCall":       ("🔍", "pattern"),
+        "globToolCall":       ("📂", "pattern"),
+        "listDirToolCall":    ("📂", "dirPath"),
+    }
+
+    def _flush_tools():
+        if not tool_calls:
+            return
+        lines.append(f"  ┌ 工具调用 ({len(tool_calls)})")
+        for tc in tool_calls:
+            lines.append(f"  │ {tc}")
+        lines.append("  └")
+        tool_calls.clear()
+
+    def _flush_assistant():
+        if not assistant_parts:
+            return
+        _flush_tools()
+        text = "\n".join(assistant_parts).strip()
+        if text:
+            lines.append(f"\n💬 回复:\n{text}\n")
+        assistant_parts.clear()
+
+    for raw_line in raw_json.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
             continue
-        
+
         try:
-            evt = json.loads(line)
+            evt = json.loads(raw_line)
         except json.JSONDecodeError:
-            # 非 JSON 行，可能是错误信息或其他输出
-            if line.startswith("Error:") or "Error:" in line:
-                lines.append(f"❌ {line}")
-            elif line.startswith("Warning:"):
-                # 忽略警告
-                continue
-            else:
-                # 其他输出原样保留
-                lines.append(line)
+            if "Error:" in raw_line:
+                lines.append(f"  ❌ {raw_line}")
+            elif not raw_line.startswith("Warning:"):
+                lines.append(raw_line)
             continue
-        
+
         evt_type = evt.get("type", "")
         subtype = evt.get("subtype", "")
-        
-        # ---- system/init: 会话初始化 ----
+
         if evt_type == "system" and subtype == "init":
-            session_id = evt.get("session_id", "")
             model = evt.get("model", "")
-            if session_id or model:
-                info = []
-                if model:
-                    info.append(f"模型: {model}")
-                if session_id:
-                    info.append(f"会话ID: {session_id[:16]}...")
-                if info:
-                    lines.append(f"🔧 初始化: {', '.join(info)}")
-            continue
-        
-        # ---- assistant: 收集文本回复 ----
-        if evt_type == "assistant":
-            msg = evt.get("message", {})
-            content = msg.get("content", [])
-            texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-            text = "".join(texts).strip()
+            sid = evt.get("session_id", "")
+            parts = []
+            if model:
+                parts.append(f"模型: {model}")
+            if sid:
+                parts.append(f"会话: {sid[:12]}…")
+            if parts:
+                lines.append(f"🔧 {', '.join(parts)}")
+
+        elif evt_type == "assistant":
+            content = evt.get("message", {}).get("content", [])
+            text = "".join(c.get("text", "") for c in content if c.get("type") == "text").strip()
             if text:
-                current_assistant_text.append(text)
-            continue
-        
-        # ---- tool_call: 收集工具调用 ----
-        if evt_type == "tool_call":
-            if subtype == "started":
-                tc = evt.get("tool_call", {})
-                tool_info = None
-                
-                # Shell 命令
-                if "shellToolCall" in tc:
-                    cmd = tc["shellToolCall"].get("args", {}).get("command", "")
-                    if cmd:
-                        tool_info = f"🔧 执行命令: {cmd}"
-                
-                # 文件编辑
-                elif "editToolCall" in tc:
-                    fpath = tc["editToolCall"].get("args", {}).get("filePath", "")
-                    if fpath:
-                        tool_info = f"✏️  编辑文件: {fpath}"
-                
-                # 文件写入/创建
-                elif "writeToolCall" in tc:
-                    fpath = tc["writeToolCall"].get("args", {}).get("filePath", "")
-                    if fpath:
-                        tool_info = f"📝 写入文件: {fpath}"
-                
-                elif "createFileToolCall" in tc:
-                    fpath = tc["createFileToolCall"].get("args", {}).get("filePath", "")
-                    if fpath:
-                        tool_info = f"📝 创建文件: {fpath}"
-                
-                # 文件读取
-                elif "readFileToolCall" in tc:
-                    fpath = tc["readFileToolCall"].get("args", {}).get("filePath", "")
-                    if fpath:
-                        tool_info = f"📖 读取文件: {fpath}"
-                
-                # 搜索
-                elif "grepToolCall" in tc:
-                    pattern = tc["grepToolCall"].get("args", {}).get("pattern", "")
-                    if pattern:
-                        tool_info = f"🔍 搜索: {pattern}"
-                
-                if tool_info:
-                    current_tool_calls.append(tool_info)
-            
-            elif subtype == "completed":
-                # 工具调用完成，已经在 started 时记录了
-                pass
-            continue
-        
-        # ---- result: 输出收集到的内容 ----
-        if evt_type == "result":
-            # 先输出工具调用
-            if current_tool_calls:
-                for tool_call in current_tool_calls:
-                    lines.append(f"  {tool_call}")
-                current_tool_calls = []
-            
-            # 再输出助手回复
-            if current_assistant_text:
-                assistant_text = "\n".join(current_assistant_text)
-                lines.append(f"\n💬 助手回复:\n{assistant_text}\n")
-                current_assistant_text = []
-            
-            # 输出统计信息
+                assistant_parts.append(text)
+
+        elif evt_type == "tool_call" and subtype == "started":
+            tc = evt.get("tool_call", {})
+            for key, (icon, arg_name) in _TOOL_ICONS.items():
+                if key in tc:
+                    val = tc[key].get("args", {}).get(arg_name, "")
+                    if val:
+                        display = val if len(val) <= 80 else val[:77] + "…"
+                        tool_calls.append(f"{icon} {display}")
+                    break
+
+        elif evt_type == "result":
+            _flush_assistant()
             duration_ms = evt.get("duration_ms", 0)
-            duration_api_ms = evt.get("duration_api_ms", 0)
             if duration_ms > 0:
-                duration_sec = duration_ms / 1000.0
-                api_sec = duration_api_ms / 1000.0 if duration_api_ms > 0 else None
-                if api_sec:
-                    lines.append(f"⏱️  耗时: {duration_sec:.1f}s (API: {api_sec:.1f}s)")
-                else:
-                    lines.append(f"⏱️  耗时: {duration_sec:.1f}s")
-            continue
-        
-        # ---- thinking: 忽略（太多 delta） ----
-        if evt_type == "thinking":
-            continue
-        
-        # ---- user: 忽略 ----
-        if evt_type == "user":
-            continue
-    
-    # 处理最后未输出的内容（即使没有 result 事件也要输出）
-    if current_tool_calls:
-        for tool_call in current_tool_calls:
-            lines.append(f"  {tool_call}")
-        current_tool_calls = []
-    
-    if current_assistant_text:
-        assistant_text = "\n".join(current_assistant_text)
-        lines.append(f"\n💬 助手回复:\n{assistant_text}\n")
-        current_assistant_text = []
-    
+                api_ms = evt.get("duration_api_ms", 0)
+                extra = f" (API: {api_ms / 1000:.1f}s)" if api_ms else ""
+                lines.append(f"⏱️  {duration_ms / 1000:.1f}s{extra}")
+
+    _flush_assistant()
+
     result = "\n".join(lines)
-    # 如果没有任何输出，返回空字符串
     return result if result.strip() else ""
 
 

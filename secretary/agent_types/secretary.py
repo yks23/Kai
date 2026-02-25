@@ -26,20 +26,6 @@ from secretary.agent_types.base import AgentType
 #  秘书执行逻辑（供 scanner 与类型内部使用）
 # ============================================================
 
-def _load_memory(secretary_name: str) -> str:
-    """加载秘书的历史记忆"""
-    memory_file = cfg.AGENTS_DIR / secretary_name / "memory.md"
-    if memory_file.exists():
-        content = memory_file.read_text(encoding="utf-8")
-        lines = content.strip().splitlines()
-        if len(lines) > 150:
-            header = lines[:2]
-            recent = lines[-150:]
-            content = "\n".join(header + ["", "...(更早的记录已省略)...", ""] + recent)
-        return content
-    return ""
-
-
 def get_goals(secretary_name: str) -> list:
     """获取当前全局目标列表（供 CLI 列出）"""
     goals_file = cfg.AGENTS_DIR / secretary_name / "goals.md"
@@ -90,23 +76,6 @@ def _load_workers_info() -> str:
     try:
         from secretary.agents import build_workers_summary
         return build_workers_summary()
-    except Exception:
-        return ""
-
-
-def _load_skills_info() -> str:
-    """加载技能信息摘要 (供秘书 Agent 了解系统能力)"""
-    try:
-        from secretary.skills import list_skills
-        skills = list_skills()
-        if not skills:
-            return ""
-        lines = []
-        for s in skills:
-            tag = "内置" if s["builtin"] else "已学"
-            desc = s["description"] or "(无描述)"
-            lines.append(f"- **{s['name']}** ({tag}): {desc}")
-        return "\n".join(lines)
     except Exception:
         return ""
 
@@ -162,18 +131,9 @@ def _append_memory(user_request: str, agent_output: str, secretary_name: str):
 
 def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
     """构建给秘书 Agent 的提示词"""
-    # 先定义 memory_file_path，避免在 memory 内容中包含 {memory_file_path} 时出错
     memory_file_path = str(cfg.AGENTS_DIR / secretary_name / "memory.md")
-    memory = _load_memory(secretary_name)
-    memory_section = ""
-    if memory:
-        memory_section = (
-            "\n## 你的历史记忆\n"
-            "以下是你之前的决策记录，请参考这些历史来保持归类和分配的一致性。\n\n"
-            + memory + "\n"
-        )
+
     workers_info = _load_workers_info()
-    workers_section = ""
     if workers_info:
         workers_section = (
             "\n## 已招募的工人及其工作总结\n"
@@ -189,35 +149,23 @@ def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
             "- 使用 `kai hire` 或 `kai hire <名字>` 来招募工人\n\n"
             "**不要创建任何任务文件，直接说明需要先招募工人。**\n"
         )
-    skills_info = _load_skills_info()
-    skills_section = ""
-    if skills_info:
-        # 使用字符串拼接而不是 f-string，避免解析 skills_info 中的大括号
-        skills_section = "\n## 系统已学技能\n" + skills_info + "\n"
+
     tasks_overview = _load_existing_tasks_summary()
-    tasks_section = ""
-    if tasks_overview:
-        tasks_section = "\n## 当前待处理任务概览\n" + tasks_overview + "\n"
+    tasks_section = "\n## 当前待处理任务概览\n" + tasks_overview + "\n" if tasks_overview else ""
+
     goals_text = _load_goals(secretary_name)
-    goals_section = ""
-    if goals_text:
-        goals_section = "\n## 当前全局目标\n" + goals_text + "\n"
+    goals_section = "\n## 当前全局目标\n" + goals_text + "\n" if goals_text else ""
+
     template = load_prompt("secretary.md")
-    default_tasks_dir = cfg.AGENTS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"
-    secretary_dir = cfg.AGENTS_DIR / secretary_name
-    reports_dir = secretary_dir / "reports"
-    # memory_file_path 已在函数开头定义
     return template.format(
         base_dir=cfg.BASE_DIR,
-        tasks_dir=str(default_tasks_dir),
+        tasks_dir=str(cfg.AGENTS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"),
         memory_file_path=memory_file_path,
-        memory_section=memory_section,
         workers_section=workers_section,
-        skills_section=skills_section,
         tasks_section=tasks_section,
         goals_section=goals_section,
         user_request=user_request,
-        reports_dir=reports_dir,
+        reports_dir=cfg.AGENTS_DIR / secretary_name / "reports",
     )
 
 
