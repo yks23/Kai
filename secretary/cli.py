@@ -528,11 +528,19 @@ def cmd_task(args):
         print(f"   💡 使用 `{_cli_name()} check {secretary_name}` 查看处理日志")
 
 
-def _create_boss(boss_name: str, goal: str, worker_name: str, max_executions: int | None = None) -> bool:
+def _create_boss(
+    boss_name: str,
+    goal: str,
+    worker_name: str,
+    max_executions: int | None = None,
+    start: bool = True,
+) -> bool:
     """
-    创建并启动 Boss Agent 的共享逻辑。
+    创建 Boss Agent 的共享逻辑。
 
-    验证名称可用性 → 创建/启动 worker → 创建 boss 目录和配置 → 注册并启动 boss。
+    验证名称可用性 → 确保 worker 存在 → 创建 boss 目录和配置 → 注册 boss。
+    当 start=True 时同时启动 worker 和 boss 的扫描器；
+    当 start=False 时只注册和创建目录结构，不启动任何扫描器。
     返回 True 表示成功，False 表示失败（已打印错误信息）。
     """
     import secretary.config as cfg
@@ -542,21 +550,22 @@ def _create_boss(boss_name: str, goal: str, worker_name: str, max_executions: in
     existing_boss = get_worker(boss_name)
     if existing_boss and existing_boss.get("type") != "boss":
         print(f"⚠️  名字 '{boss_name}' 已被注册为 {existing_boss.get('type')} 类型，不能用作boss")
-        print(f"   请使用其他名字或先解雇该agent")
+        print("   请使用其他名字或先解雇该agent")
         return False
 
     # 确保worker_name可用且不是非worker类型
     existing_worker = get_worker(worker_name)
     if existing_worker and existing_worker.get("type") != "worker":
         print(f"⚠️  名字 '{worker_name}' 已被注册为 {existing_worker.get('type')} 类型，不能用作worker")
-        print(f"   请使用其他名字或先解雇该agent")
+        print("   请使用其他名字或先解雇该agent")
         return False
 
-    # 创建/启动 worker
+    # 确保 worker 存在
     if not existing_worker:
         register_agent(worker_name, agent_type="worker", description=f"由Boss {boss_name}监控的Worker")
         print(f"✅ 已创建worker: {worker_name}")
-        _start_agent_scanner(worker_name, "worker", silent=False)
+        if start:
+            _start_agent_scanner(worker_name, "worker", silent=False)
 
     # 创建boss目录和配置
     boss_dir = cfg.AGENTS_DIR / boss_name
@@ -582,22 +591,30 @@ def _create_boss(boss_name: str, goal: str, worker_name: str, max_executions: in
     if not existing_boss:
         register_agent(boss_name, agent_type="boss", description=f"Boss: {goal[:50]}")
 
-    _start_agent_scanner(boss_name, "boss", silent=False)
+    if start:
+        _start_agent_scanner(boss_name, "boss", silent=False)
+        print(f"✅ Boss '{boss_name}' 已创建并启动")
+    else:
+        print(f"✅ Boss '{boss_name}' 已创建（未启动扫描器）")
 
-    print(f"✅ Boss '{boss_name}' 已创建并启动")
     print(f"   持续目标: {goal}")
     print(f"   监控Worker: {worker_name}")
+    if not start:
+        name = _cli_name()
+        print(f"   💡 启动: {name} hire {boss_name}")
     return True
 
 
 def cmd_boss(args):
-    """创建并启动Boss Agent：监控指定worker，在队列为空时生成新任务"""
+    """创建 Boss Agent：监控指定 worker，在队列为空时生成新任务。
+    默认创建后立即启动扫描器；使用 --no-start 则仅创建目录和配置。"""
     import secretary.config as cfg
 
     boss_name = args.boss_name
     goal_keyword = args.goal
     worker_name = args.worker_name or cfg.DEFAULT_WORKER_NAME
     max_executions = args.max_executions
+    should_start = not getattr(args, "no_start", False)
 
     # 解析目标
     if goal_keyword != "task":
@@ -613,7 +630,7 @@ def cmd_boss(args):
         else:
             goal = "推进项目目标"
 
-    _create_boss(boss_name, goal, worker_name, max_executions)
+    _create_boss(boss_name, goal, worker_name, max_executions, start=should_start)
 
 
 
@@ -712,59 +729,68 @@ def cmd_skills(args):
 # ============================================================
 
 def cmd_hire(args):
-    """招募并启动agent：hire <name> <type>，type 可以是 secretary / worker / recycler"""
+    """
+    招募 agent 并启动扫描器。
+
+    语法:
+      hire [name] [type] [extra...]
+
+    type 可以是 secretary / worker / recycler / boss。
+    对于 boss 类型需要额外的 worker 名称参数：
+      hire myboss boss myworker          — 创建 boss（不启动扫描器）
+      hire myboss boss myworker -d "目标" — 同上，-d 作为目标描述
+
+    若 agent 已存在且未运行，则重新启动其扫描器。
+    """
     from secretary.agents import pick_random_name, register_agent, get_worker
     import secretary.config as cfg
 
-    # 解析参数：hire <name> [type] 或 hire <name> <type> --description "描述"
-    # worker_names 来自解析器：不填则 []，hire alice -> [alice]，hire alice worker -> [alice, worker]
     worker_names = getattr(args, "worker_names", None)
-    # 确保 worker_names 是列表
-    if worker_names is None:
-        names = []
-    elif isinstance(worker_names, list):
-        names = worker_names
-    else:
-        # 如果不是列表，尝试转换为列表
-        names = [worker_names] if worker_names else []
-    
-    # 支持的类型关键词
-    valid_types = ("secretary", "worker", "recycler")
-    
-    # 识别参数中的类型关键词和名称
-    agent_type = "worker"  # 默认类型
+    names = list(worker_names) if worker_names else []
+
+    valid_types = ("secretary", "worker", "recycler", "boss")
+
+    # 按顺序识别：类型关键词 / agent 名称 / 额外参数
+    agent_type = "worker"
     agent_name = None
-    
+    extra_args: list[str] = []
+
     for arg in names:
-        arg_lower = arg.lower()
-        if arg_lower in valid_types:
-            # 如果参数是类型关键词，设置为类型
-            agent_type = arg_lower
+        if arg.lower() in valid_types and agent_type == "worker":
+            agent_type = arg.lower()
+        elif agent_name is None:
+            agent_name = arg
         else:
-            # 如果参数不是类型关键词，作为名称（只取第一个非类型参数作为名称）
-            if agent_name is None:
-                agent_name = arg
-    
-    # 如果没有找到名称，随机生成一个
+            extra_args.append(arg)
+
     if agent_name is None:
         agent_name = pick_random_name()
-    
+
     description = getattr(args, "description", None) or ""
 
-    # 检查是否已存在
+    # ---- 如果 agent 已存在：空闲则重启，运行中则提示 ----
     existing = get_worker(agent_name)
     if existing:
-        print(f"ℹ️  Agent '{agent_name}' 已存在")
-        print(f"   类型: {existing.get('type', 'unknown')}")
+        existing_type = existing.get("type", "worker")
+        pid = existing.get("pid")
+        if pid and _check_process_exists(pid):
+            print(f"ℹ️  Agent '{agent_name}' 已在运行 (PID={pid})")
+        else:
+            print(t("msg_starting_agent").format(agent_name=agent_name, agent_type=existing_type))
+            _start_agent_scanner(agent_name, existing_type, silent=False)
         return
 
-    # 注册agent
-    register_agent(agent_name, agent_type=agent_type, description=description)
-    print(f"✅ 已注册 {agent_type} agent: {agent_name}")
-
-    # 长时间操作提示，再启动
-    print(t("msg_starting_agent").format(agent_name=agent_name, agent_type=agent_type))
-    _start_agent_scanner(agent_name, agent_type, silent=False)
+    # ---- 新建 agent ----
+    if agent_type == "boss":
+        # boss 需要额外的 worker_name 参数
+        monitored_worker = extra_args[0] if extra_args else cfg.DEFAULT_WORKER_NAME
+        goal = description or "推进项目目标"
+        _create_boss(agent_name, goal, monitored_worker, start=False)
+    else:
+        register_agent(agent_name, agent_type=agent_type, description=description)
+        print(f"✅ 已注册 {agent_type} agent: {agent_name}")
+        print(t("msg_starting_agent").format(agent_name=agent_name, agent_type=agent_type))
+        _start_agent_scanner(agent_name, agent_type, silent=False)
 
 
 
@@ -1476,10 +1502,15 @@ def cmd_help(args):
 👔 创建 Boss Agent
 
 用法:
-  {name} boss <名称> "目标" <worker名称>
+  {name} boss <名称> "目标" <worker名称> [--no-start]
 
 示例:
-  {name} boss myboss "完成登录模块" sen
+  {name} boss myboss "完成登录模块" sen          创建并启动
+  {name} boss myboss "完成登录模块" sen --no-start  仅创建，不启动
+
+说明:
+  --no-start 仅创建目录结构和配置文件，不启动扫描器。
+  可后续通过 `{name} hire myboss` 启动已创建的 boss。
 """,
             "use": f"""
 🎯 使用技能
@@ -1515,11 +1546,19 @@ def cmd_help(args):
 👷 招募 agent
 
 用法:
-  {name} hire [<名字>] [<类型>] [-d "描述"]
+  {name} hire [<名字>] [<类型>] [<额外参数>] [-d "描述"]
 
 示例:
-  {name} hire alice worker
-  {name} hire recycler recycler
+  {name} hire                         随机名字的 worker
+  {name} hire alice                   名为 alice 的 worker
+  {name} hire alice worker            同上（显式类型）
+  {name} hire yks secretary           名为 yks 的 secretary
+  {name} hire myboss boss myworker    boss 监控 myworker（仅注册，不启动）
+  {name} hire myboss boss myworker -d "完成登录模块"  同上并设定目标
+
+说明:
+  对于已注册但未运行的 agent，再次 hire 会启动其扫描器。
+  boss 类型通过 hire 创建时不会立即启动，可后续再次 hire 同名 agent 启动。
 """,
             "fire": f"""
 🔥 解雇 agent
@@ -1893,9 +1932,10 @@ def main():
   {name} keep "持续目标" --worker sen        持续监控模式，自动生成任务推进目标
 
 工人管理:
-  {name} hire                       👷 招募 worker (只注册，不启动)
+  {name} hire                       👷 招募 worker
   {name} hire alice                 👷 招募叫 alice 的 worker
   {name} hire <name> secretary      🤖 创建并启动 secretary agent
+  {name} hire <name> boss <worker>  👔 创建 boss（不启动，后续再 hire 启动）
   {name} fire alice                 🔥 解雇 alice
   {name} workers                    📋 列出已注册的 agent
 
@@ -1958,11 +1998,12 @@ def main():
     p.add_argument("--worker", type=str, default=None, help="直接分配给指定 worker，跳过秘书")
     
     # ---- boss ----
-    p = subparsers.add_parser("boss", help="👔 创建并启动Boss Agent：监控指定worker，在队列为空时生成新任务")
+    p = subparsers.add_parser("boss", help="👔 创建Boss Agent：监控指定worker，在队列为空时生成新任务")
     p.add_argument("boss_name", help="Boss名称")
     p.add_argument("goal", help="持续目标描述（固定关键字 'task'）")
     p.add_argument("worker_name", help="监控的worker名称")
     p.add_argument("max_executions", type=int, nargs="?", default=None, help="最大执行次数（可选，不指定则无限次）")
+    p.add_argument("--no-start", action="store_true", help="仅创建目录和配置，不启动扫描器")
     
 
     # ---- use <skill> ----
@@ -1985,12 +2026,18 @@ def main():
     # ---- hire ----
     p = subparsers.add_parser(
         "hire",
-        help="招募并启动 agent（secretary/worker/recycler）",
-        description="招募并启动后台 agent。可指定名称与类型，不填则随机取名且类型为 worker。",
+        help="招募 agent（secretary/worker/recycler/boss）",
+        description=(
+            "招募后台 agent。可指定名称与类型，不填则随机取名且类型为 worker。\n"
+            "对于 boss 类型，需要额外指定监控的 worker 名称：\n"
+            "  hire myboss boss myworker\n"
+            "boss 通过 hire 创建时不会立即启动扫描器，可后续再次 hire 同名 agent 启动。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("worker_names", nargs="*", default=None,
-                   help="名称与可选类型，如 alice worker、recycler recycler；不填则随机取名")
-    p.add_argument("-d", "--description", type=str, default="", help="描述")
+                   help="名称、类型及可选额外参数，如 alice worker、myboss boss myworker")
+    p.add_argument("-d", "--description", type=str, default="", help="描述 (对 boss 类型同时作为目标描述)")
 
     # ---- fire ----
     p = subparsers.add_parser("fire", help="🔥 解雇一个或多个工人")
