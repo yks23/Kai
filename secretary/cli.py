@@ -955,18 +955,13 @@ def cmd_recycle(args):
 
 
 def cmd_monitor(args):
-    """监控面板。交互模式下默认输出文本快照（不阻塞），CLI 模式下启动 TUI。"""
+    """实时监控面板（TUI，q 退出）。--text/--once 输出文本快照。"""
     if not _is_workspace_configured(args):
         print(t("workspace_not_set_hint").format(name=_cli_name()))
     from secretary.ui.dashboard import run_monitor
 
     text_mode = getattr(args, "text", False)
     once = getattr(args, "once", False)
-    interactive = getattr(args, "_interactive", False)
-
-    # 交互模式下默认输出文本快照，不阻塞
-    if interactive and not text_mode and not once:
-        text_mode = True
 
     if text_mode or once:
         run_monitor(refresh_interval=args.interval, text_mode=True, once=True)
@@ -1136,8 +1131,8 @@ def _cleanup_all_processes():
 
 
 def cmd_check(args):
-    """实时查看 agent 日志（类似 tail -f），默认显示最后 20 行 + 实时跟踪"""
-    from secretary.agents import get_worker, _worker_logs_dir, update_worker_status
+    """查看 agent 日志。默认进入翻页浏览器（q 退出），-f 实时跟踪。"""
+    from secretary.agents import get_worker, _worker_logs_dir
     import threading
     import time
 
@@ -1163,78 +1158,88 @@ def cmd_check(args):
             print(f"   💡 先启动: {_cli_name()} hire {worker_name}")
         return
 
-    # ---- 头部信息 ----
-    type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
-    icon = type_icons.get(agent_type, "❓")
-    status_str = f"运行中 PID={pid}" if is_running else "未运行"
-    log_size = log_file.stat().st_size
-    size_str = f"{log_size / 1024:.1f}KB" if log_size > 1024 else f"{log_size}B"
+    follow = getattr(args, "follow", False)
 
-    print(f"\n{icon} {worker_name} ({agent_type}) — {status_str}")
-    print(f"   日志: {log_file} ({size_str})")
-    print(f"   Ctrl+C 退出" + (f" (不影响 agent 运行)" if is_running else ""))
-    print(f"{'─' * 60}")
-
-    # ---- 显示最后 N 行 ----
-    tail_n = getattr(args, "tail", 20) or 20
-    try:
-        all_lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-        if all_lines:
-            tail_start = max(0, len(all_lines) - tail_n)
-            if tail_start > 0:
-                print(f"  ... (省略前 {tail_start} 行)\n")
-            for line in all_lines[tail_start:]:
-                print(line)
-    except Exception:
-        pass
-
-    interactive = getattr(args, "_interactive", False)
-
-    # 交互模式 / agent 未运行：只显示 tail，不 follow
-    if interactive or not is_running:
+    if follow:
+        # -f 模式：实时跟踪（tail -f），Ctrl+C 退出
+        type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
+        icon = type_icons.get(agent_type, "❓")
+        status_str = f"运行中 PID={pid}" if is_running else "未运行"
+        print(f"\n{icon} {worker_name} — {status_str} | Ctrl+C 退出")
         print(f"{'─' * 60}")
-        if not is_running:
-            print(f"Agent 未运行。启动: {_cli_name()} hire {worker_name}")
-        elif interactive:
-            print(f"💡 实时跟踪: 在 CLI 下运行 {_cli_name()} check {worker_name}")
-        return
 
-    # CLI 模式 + agent 运行中：实时 follow
-    print(f"{'─' * 60}")
-    print(f"实时跟踪中… Ctrl+C 退出\n")
-
-    stop_event = threading.Event()
-
-    def _tail_follow():
+        # 先打印最后几行
         try:
-            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                f.seek(0, 2)
-                while not stop_event.is_set():
-                    line = f.readline()
-                    if line:
-                        print(line, end="", flush=True)
-                    else:
-                        try:
-                            if f.tell() > log_file.stat().st_size:
-                                f.seek(0)
-                        except Exception:
-                            pass
-                        time.sleep(0.1)
-        except Exception as e:
-            if not stop_event.is_set():
-                print(f"\n⚠️  读取日志出错: {e}")
+            lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in lines[-10:]:
+                print(line)
+        except Exception:
+            pass
 
-    tail_thread = threading.Thread(target=_tail_follow, daemon=True)
-    tail_thread.start()
+        stop_event = threading.Event()
 
-    try:
-        while not stop_event.is_set():
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        stop_event.set()
+        def _tail_follow():
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(0, 2)
+                    while not stop_event.is_set():
+                        line = f.readline()
+                        if line:
+                            print(line, end="", flush=True)
+                        else:
+                            try:
+                                if f.tell() > log_file.stat().st_size:
+                                    f.seek(0)
+                            except Exception:
+                                pass
+                            time.sleep(0.1)
+            except Exception as e:
+                if not stop_event.is_set():
+                    print(f"\n⚠️  {e}")
 
-    print(f"\n{'─' * 60}")
-    print(f"👋 退出查看（{worker_name} 继续运行）")
+        tail_thread = threading.Thread(target=_tail_follow, daemon=True)
+        tail_thread.start()
+        try:
+            while not stop_event.is_set():
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            stop_event.set()
+        print(f"\n{'─' * 60}")
+    else:
+        # 默认模式：用 less 翻页浏览全部日志（支持鼠标滚动、搜索、q 退出）
+        log_size = log_file.stat().st_size
+        size_str = f"{log_size / 1024:.1f}KB" if log_size > 1024 else f"{log_size}B"
+        status_str = f"运行中 PID={pid}" if is_running else "未运行"
+
+        # 构建带头部的内容
+        header = (
+            f"{'─' * 60}\n"
+            f" {worker_name} ({agent_type}) — {status_str} | {size_str}\n"
+            f" q 退出 | / 搜索 | g 顶部 | G 底部\n"
+            f"{'─' * 60}\n\n"
+        )
+
+        try:
+            content = header + log_file.read_text(encoding="utf-8", errors="ignore")
+            # 用 less 打开，+G 跳到底部，-R 支持颜色，--mouse 支持鼠标滚动
+            proc = subprocess.Popen(
+                ["less", "-R", "--mouse", "+G"],
+                stdin=subprocess.PIPE,
+                encoding="utf-8",
+                errors="replace",
+            )
+            proc.communicate(input=content)
+        except FileNotFoundError:
+            # less 不可用，退化为直接输出最后 50 行
+            print(header)
+            lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+            start = max(0, len(lines) - 50)
+            if start > 0:
+                print(f"  ... (省略前 {start} 行)\n")
+            for line in lines[start:]:
+                print(line)
+        except (BrokenPipeError, KeyboardInterrupt):
+            pass
 
 
 def cmd_clean_logs(args):
@@ -1534,10 +1539,11 @@ def cmd_help(args):
   {name} monitor [--text] [--once] [-i 秒数]
 """,
             "check": f"""
-📺 查看日志
+📺 查看 agent 日志
 
 用法:
-  {name} check <agent名称> [--tail 行数]
+  {name} check <agent名称>       翻页浏览（q 退出，/ 搜索，G 跳到底部）
+  {name} check <agent名称> -f    实时跟踪（Ctrl+C 退出）
 """,
             "clean-logs": f"""
 🧹 清理日志
@@ -1783,8 +1789,6 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
         # 刷新可用技能列表 (用户可能刚 learn 了新技能)
         _refresh_skill_names(skill_names)
 
-        # 标记交互模式，让阻塞型命令自动调整行为
-        args._interactive = True
         try:
             handlers[args.command](args)
         except SystemExit as e:
@@ -2015,9 +2019,9 @@ Agent管理 (hire 统一入口):
                    help="命令名称 (可选,显示特定命令的详细帮助)")
 
     # ---- check / clean-logs / clean-processes ----
-    p = subparsers.add_parser("check", help="📺 实时查看 agent 的日志输出")
-    p.add_argument("worker_name", help="agent 名称 (如 sen、yks 等)")
-    p.add_argument("--tail", type=int, default=0, help="只显示最后 N 行（默认显示所有内容）")
+    p = subparsers.add_parser("check", help="📺 查看 agent 日志（翻页浏览，q 退出）")
+    p.add_argument("worker_name", help="agent 名称")
+    p.add_argument("-f", "--follow", action="store_true", help="实时跟踪模式（类似 tail -f）")
     subparsers.add_parser("clean-logs", help="🧹 清理 logs/ 下的日志文件")
     subparsers.add_parser("clean-processes", help="🧹 清理泄露的 worker 进程记录")
 
