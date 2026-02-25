@@ -42,7 +42,7 @@ import re
 
 import secretary.config as cfg
 from secretary.config import EXECUTABLE_TASK_TYPES
-from secretary.agent_config import AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig, build_worker_config, build_boss_config, build_recycler_config
+from secretary.agent_config import AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig
 from secretary.agent_types.worker import run_worker_first_round, run_worker_continue, run_worker_refine
 from secretary.agent_runner import RoundStats
 from secretary.agent_loop import run_loop, load_prompt
@@ -714,66 +714,13 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
 
 
 def _get_agent_type(config: AgentConfig):
-    """
-    根据配置获取对应的 AgentType 实例
-    
-    使用注册表动态查找，支持内置类型和自定义类型。
-    优先从 agent 注册信息中获取类型名称，如果不存在则根据提示词模板推断。
-    """
-    from secretary.agent_registry import get_agent_type, initialize_registry, list_agent_types
-    from secretary.agents import get_worker
-    import secretary.config as cfg
-    
-    # 确保注册表已初始化
+    """根据配置获取对应的 AgentType 实例（委托给注册表）"""
+    from secretary.agent_registry import resolve_agent_type, initialize_registry
     try:
         initialize_registry(cfg.CUSTOM_AGENTS_DIR)
     except Exception:
-        pass  # 如果初始化失败，继续尝试使用已注册的类型
-    
-    # 方法1: 从 agent 注册信息中获取类型名称
-    worker_info = get_worker(config.name)
-    if worker_info and worker_info.get("type"):
-        type_name = worker_info["type"]
-        agent_type = get_agent_type(type_name)
-        if agent_type:
-            return agent_type
-    
-    # 方法2: 根据提示词模板推断类型（向后兼容）
-    prompt_to_type = {
-        "worker_first_round.md": "worker",
-        "secretary.md": "secretary",
-        "boss.md": "boss",
-        "recycler.md": "recycler",
-    }
-    
-    type_name = prompt_to_type.get(config.first_round_prompt)
-    if type_name:
-        agent_type = get_agent_type(type_name)
-        if agent_type:
-            return agent_type
-    
-    # 方法3: 尝试直接使用提示词模板名称（去掉 .md 后缀）
-    if config.first_round_prompt.endswith(".md"):
-        type_name = config.first_round_prompt[:-3]
-        # 处理特殊名称（如 worker_first_round -> worker）
-        if type_name.startswith("worker_"):
-            type_name = "worker"
-        agent_type = get_agent_type(type_name)
-        if agent_type:
-            return agent_type
-    
-    # 方法4: 默认使用 worker（向后兼容）
-    default_type = get_agent_type("worker")
-    if default_type:
-        return default_type
-    
-    # 如果所有方法都失败，抛出异常
-    available_types = list_agent_types()
-    raise ValueError(
-        f"无法确定 agent 类型。"
-        f"配置: name={config.name}, prompt={config.first_round_prompt}. "
-        f"可用类型: {', '.join(available_types) if available_types else '无'}"
-    )
+        pass
+    return resolve_agent_type(config.name)
 
 
 def _process_one_unified(config: AgentConfig, file_path: Path, verbose: bool) -> None:
@@ -905,34 +852,32 @@ def run_kai_scanner(once: bool = False, verbose: bool = False, secretary_name: s
     run_unified_scanner(config, once=once, verbose=verbose)
 
 
+def _build_config_for(type_name: str, agent_name: str) -> AgentConfig:
+    """通过注册表构建 AgentConfig，取代原来的 build_*_config wrappers"""
+    from secretary.agent_registry import get_agent_type
+    agent_type = get_agent_type(type_name)
+    if not agent_type:
+        raise ValueError(f"未知 agent 类型: {type_name}")
+    return agent_type.build_config(cfg.BASE_DIR, agent_name)
+
+
 def run_scanner(once: bool = False, verbose: bool = True, worker_name: str | None = None) -> None:
-    """
-    运行 Worker 扫描循环（使用统一的循环逻辑）。
-    每轮最多处理一项：优先 ongoing/，否则从 tasks/ 拉新任务。
-    """
-    config = build_worker_config(cfg.BASE_DIR, worker_name or cfg.DEFAULT_WORKER_NAME)
+    """运行 Worker 扫描循环"""
+    config = _build_config_for("worker", worker_name or cfg.DEFAULT_WORKER_NAME)
     run_unified_scanner(config, once=once, verbose=verbose)
 
 
 def run_boss_scanner(once: bool = False, verbose: bool = True, boss_name: str | None = None) -> None:
-    """
-    运行 Boss 扫描循环（使用统一的循环逻辑）。
-    Boss监控指定worker的队列，在队列为空时生成新任务。
-    """
+    """运行 Boss 扫描循环"""
     if not boss_name:
         raise ValueError("Boss名称不能为空")
-    config = build_boss_config(cfg.BASE_DIR, boss_name)
+    config = _build_config_for("boss", boss_name)
     run_unified_scanner(config, once=once, verbose=verbose)
 
 
 def run_recycler_scanner(once: bool = False, verbose: bool = True, recycler_name: str | None = None) -> None:
-    """
-    运行 Recycler 扫描循环（使用统一的循环逻辑）。
-    Recycler扫描所有agent的reports目录，审查完成报告。
-    """
-    if not recycler_name:
-        recycler_name = "recycler"
-    config = build_recycler_config(cfg.BASE_DIR, recycler_name)
+    """运行 Recycler 扫描循环"""
+    config = _build_config_for("recycler", recycler_name or "recycler")
     run_unified_scanner(config, once=once, verbose=verbose)
 
 

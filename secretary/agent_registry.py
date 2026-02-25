@@ -268,3 +268,27 @@ def initialize_registry(custom_agents_dir: Optional[Path] = None) -> None:
     """初始化注册表"""
     _registry.initialize(custom_agents_dir)
 
+
+def resolve_agent_type(agent_name: str) -> AgentType:
+    """
+    根据 agent 名称解析对应的 AgentType 实例。
+
+    查找顺序：
+      1. 从 agents.json 注册信息中获取 type 字段 → 注册表查找
+      2. 回退到 "worker" 类型
+      3. 都失败则抛出 ValueError
+    """
+    from secretary.agents import get_worker
+
+    worker_info = get_worker(agent_name)
+    if worker_info and worker_info.get("type"):
+        agent_type = _registry.get(worker_info["type"])
+        if agent_type:
+            return agent_type
+
+    default = _registry.get("worker")
+    if default:
+        return default
+
+    raise ValueError(f"无法解析 agent 类型: {agent_name}, 可用: {', '.join(_registry.list_types())}")
+

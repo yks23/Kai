@@ -251,8 +251,9 @@ def process_report(report_file: Path, recycler_config: AgentConfig | None = None
 
 def run_recycler(once: bool = False, verbose: bool = True, recycler_name: str = "recycler") -> None:
     """运行回收者主循环（供 CLI 调用）。"""
-    from secretary.agent_config import build_recycler_config
-    config = build_recycler_config(cfg.BASE_DIR, recycler_name)
+    from secretary.agent_registry import get_agent_type
+    recycler_type = get_agent_type("recycler")
+    config = recycler_type.build_config(cfg.BASE_DIR, recycler_name)
 
     def trigger_fn():
         return _find_report_files()
