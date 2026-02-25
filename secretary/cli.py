@@ -1291,6 +1291,185 @@ def cmd_clean_processes(args):
 
 
 # ============================================================
+#  upgrade 命令 + 更新检查
+# ============================================================
+
+def _find_repo_root() -> Path | None:
+    """查找 Kai 源码的 git 仓库根目录（editable install 时是源码目录）"""
+    pkg_dir = Path(__file__).resolve().parent
+    candidate = pkg_dir.parent
+    if (candidate / ".git").is_dir() and (candidate / "pyproject.toml").is_file():
+        return candidate
+    return None
+
+
+def _get_update_check_file() -> Path:
+    """更新检查状态文件路径"""
+    from secretary.settings import _config_dir
+    return _config_dir() / "update_check.json"
+
+
+def _check_for_updates(silent: bool = True) -> str | None:
+    """
+    检查远端主分支是否有新提交（每天最多检查一次）。
+    返回提示文本，如果无更新或检查跳过则返回 None。
+    """
+    import json
+    import time
+
+    check_file = _get_update_check_file()
+    now = time.time()
+
+    # 读取上次检查时间
+    last_check = 0
+    try:
+        if check_file.exists():
+            data = json.loads(check_file.read_text(encoding="utf-8"))
+            last_check = data.get("last_check", 0)
+    except Exception:
+        pass
+
+    # 每 24 小时检查一次
+    if now - last_check < 86400:
+        return None
+
+    repo = _find_repo_root()
+    if not repo:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "--dry-run"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo),
+        )
+        has_updates = bool(result.stderr.strip())
+
+        # 保存检查时间
+        check_file.parent.mkdir(parents=True, exist_ok=True)
+        check_file.write_text(
+            json.dumps({"last_check": now, "has_updates": has_updates}),
+            encoding="utf-8",
+        )
+
+        if has_updates:
+            return f"💡 有新版本可用，运行 `{_cli_name()} upgrade` 更新"
+    except Exception:
+        pass
+    return None
+
+
+def cmd_upgrade(args):
+    """从远端 git 拉取最新代码并重新安装"""
+    repo = _find_repo_root()
+    if not repo:
+        print("❌ 未找到 Kai 源码仓库（仅支持 editable install 方式）")
+        print(f"   如果通过 pip install kai 安装，请用: pip install -U kai")
+        return
+
+    name = _cli_name()
+    print(f"\n🔄 {name} upgrade — {repo}\n")
+
+    # 1. git fetch
+    print("   ⏳ 获取远端更新...")
+    fetch = subprocess.run(
+        ["git", "fetch", "--all", "--prune"],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(repo),
+    )
+    if fetch.returncode != 0:
+        print(f"   ❌ git fetch 失败: {fetch.stderr.strip()}")
+        return
+
+    # 2. 检查当前分支和远端差异
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, timeout=5,
+        cwd=str(repo),
+    )
+    branch = branch_result.stdout.strip() or "main"
+
+    # 检查本地有无未提交更改
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True, text=True, timeout=5,
+        cwd=str(repo),
+    )
+    has_changes = bool(status.stdout.strip())
+
+    # 检查远端是否有新提交
+    log_result = subprocess.run(
+        ["git", "log", f"HEAD..origin/{branch}", "--oneline"],
+        capture_output=True, text=True, timeout=5,
+        cwd=str(repo),
+    )
+    new_commits = log_result.stdout.strip()
+
+    if not new_commits:
+        print(f"   ✅ 已是最新版本 (分支: {branch})")
+        return
+
+    print(f"   📋 远端有新提交 ({branch}):")
+    for line in new_commits.splitlines()[:10]:
+        print(f"      {line}")
+    if new_commits.count("\n") >= 10:
+        print(f"      ... 共 {new_commits.count(chr(10)) + 1} 个提交")
+
+    # 3. git pull (如果有本地更改则 stash)
+    stashed = False
+    if has_changes:
+        print("   ⚠️  检测到本地未提交更改，暂存中...")
+        subprocess.run(
+            ["git", "stash", "push", "-m", "kai-upgrade-auto-stash"],
+            capture_output=True, timeout=10, cwd=str(repo),
+        )
+        stashed = True
+
+    print(f"   ⏳ 拉取 origin/{branch}...")
+    pull = subprocess.run(
+        ["git", "pull", "origin", branch, "--ff-only"],
+        capture_output=True, text=True, timeout=30,
+        cwd=str(repo),
+    )
+    if pull.returncode != 0:
+        print(f"   ❌ git pull 失败: {pull.stderr.strip()}")
+        if stashed:
+            subprocess.run(["git", "stash", "pop"], capture_output=True, timeout=10, cwd=str(repo))
+        return
+
+    # 4. 恢复 stash
+    if stashed:
+        print("   ⏳ 恢复本地更改...")
+        pop = subprocess.run(
+            ["git", "stash", "pop"],
+            capture_output=True, text=True, timeout=10, cwd=str(repo),
+        )
+        if pop.returncode != 0:
+            print(f"   ⚠️  stash 恢复冲突，请手动处理: git stash pop")
+
+    # 5. pip install -e .
+    print("   ⏳ 重新安装...")
+    install = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", str(repo), "-q"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if install.returncode != 0:
+        print(f"   ❌ pip install 失败: {install.stderr.strip()[:200]}")
+        return
+
+    # 6. 更新检查状态
+    import json, time
+    check_file = _get_update_check_file()
+    check_file.parent.mkdir(parents=True, exist_ok=True)
+    check_file.write_text(
+        json.dumps({"last_check": time.time(), "has_updates": False}),
+        encoding="utf-8",
+    )
+
+    print(f"\n   ✅ 更新完成！重启 {name} 以使用新版本。")
+
+
+# ============================================================
 #  base 命令 — 设定/查看工作区
 # ============================================================
 
@@ -1545,6 +1724,17 @@ def cmd_help(args):
   {name} check <agent名称>       翻页浏览（q 退出，/ 搜索，G 跳到底部）
   {name} check <agent名称> -f    实时跟踪（Ctrl+C 退出）
 """,
+            "upgrade": f"""
+🔄 更新 Kai 到最新版本
+
+用法:
+  {name} upgrade
+
+说明:
+  从远端 git 仓库拉取最新代码（git pull）并重新安装（pip install -e .）。
+  仅支持 editable install 方式。如果有本地未提交更改会自动 stash/恢复。
+  系统每天自动检查一次是否有新版本，有的话会在启动时提示。
+""",
             "clean-logs": f"""
 🧹 清理日志
 
@@ -1674,7 +1864,8 @@ def _print_command_list(name: str):
             ("model", "设置或查看AI模型"),
             ("target", "创建Boss Agent的别名"),
         ]),
-        ("🧹 清理", [
+        ("🧹 维护", [
+            ("upgrade", "拉取最新代码并重新安装"),
             ("clean-logs", "清理日志文件"),
             ("clean-processes", "清理泄露的进程记录"),
         ]),
@@ -1710,11 +1901,18 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     except Exception:
         pass
 
-    # 简洁的欢迎信息
     from secretary.agents import list_workers
     agents = list_workers()
     agent_summary = f"{len(agents)} 个 agent" if agents else "无 agent"
     print(f"\n{name} — {agent_summary} | help 帮助 | exit 退出")
+
+    # 每日更新检查
+    try:
+        hint = _check_for_updates()
+        if hint:
+            print(f"   {hint}")
+    except Exception:
+        pass
 
     # 后台静默启动空闲 agents
     try:
@@ -1780,7 +1978,7 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             continue
 
         # base / name / model / help 不需要 ensure_dirs
-        if args.command in ("base", "name", "model", "help"):
+        if args.command in ("base", "name", "model", "help", "upgrade"):
             handlers[args.command](args)
             continue
 
@@ -2025,6 +2223,9 @@ Agent管理 (hire 统一入口):
     subparsers.add_parser("clean-logs", help="🧹 清理 logs/ 下的日志文件")
     subparsers.add_parser("clean-processes", help="🧹 清理泄露的 worker 进程记录")
 
+    # ---- upgrade ----
+    subparsers.add_parser("upgrade", help="🔄 从远端拉取最新代码并重新安装")
+
     handlers = {
         "task": cmd_task,
         "boss": cmd_boss,
@@ -2040,6 +2241,7 @@ Agent管理 (hire 统一入口):
         "check": cmd_check,
         "clean-logs": cmd_clean_logs,
         "clean-processes": cmd_clean_processes,
+        "upgrade": cmd_upgrade,
         "base": cmd_base,
         "name": cmd_name,
         "model": cmd_model,
@@ -2072,7 +2274,7 @@ Agent管理 (hire 统一入口):
         pass  # 如果初始化失败，不影响其他功能
 
     # base / name / model / help 命令不需要 ensure_dirs
-    if args.command in ("base", "name", "model", "help"):
+    if args.command in ("base", "name", "model", "help", "upgrade"):
         handlers[args.command](args)
         return
 
