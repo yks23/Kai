@@ -37,40 +37,26 @@ def _try_parse_workspace(task_file: Path) -> str:
 
 def build_first_round_prompt(task_file: Path, report_dir: Path | None = None, agent_name: str | None = None) -> str:
     """首轮提示词 — 从模板加载，填入任务内容"""
-    from secretary.agents import _worker_reports_dir, load_agent_memory, _worker_memory_file
+    from secretary.agents import _worker_reports_dir, _worker_memory_file
 
     task_content = task_file.read_text(encoding="utf-8")
-    task_filename = task_file.name
-    report_filename = task_filename.replace(".md", "") + "-report.md"
+    report_filename = task_file.name.replace(".md", "") + "-report.md"
     if report_dir is None and agent_name:
         report_dir = _worker_reports_dir(agent_name)
     effective_report_dir = report_dir or (BASE_DIR / "agents" / "unknown" / "reports")
 
-    memory_content = ""
-    memory_file_path = None
+    memory_file_path = ""
     if agent_name:
-        memory_content = load_agent_memory(agent_name)
         memory_file_path = _worker_memory_file(agent_name)
-    memory_section = ""
-    if memory_content:
-        memory_section = (
-            "\n## 你的工作历史（Memory）\n"
-            "以下是你的工作总结，包含你之前完成的任务和工作经验：\n\n"
-            f"{memory_content}\n"
-        )
-        if memory_file_path:
-            memory_section += f"\n**你的memory文件路径**: `{memory_file_path}`\n"
 
     template = load_prompt("worker_first_round.md")
     return template.format(
         base_dir=BASE_DIR,
         task_file=task_file,
-        task_filename=task_filename,
         task_content=task_content,
         report_dir=effective_report_dir,
         report_filename=report_filename,
-        memory_section=memory_section,
-        memory_file_path=memory_file_path if memory_file_path else "",
+        memory_file_path=memory_file_path,
     )
 
 

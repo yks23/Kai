@@ -89,25 +89,6 @@ from secretary.agent_paths import (
 )
 
 
-def load_agent_memory(agent_name: str) -> str:
-    """
-    加载agent的memory内容（通用函数，适用于所有agent类型）
-    
-    Returns:
-        memory内容，如果不存在或为空则返回空字符串
-    """
-    memory_file = _worker_memory_file(agent_name)
-    if memory_file.exists():
-        content = memory_file.read_text(encoding="utf-8").strip()
-        # 如果内容太长，只返回最近的部分
-        lines = content.splitlines()
-        if len(lines) > 200:
-            header = lines[:5]  # 保留前5行（标题和基本信息）
-            recent = lines[-195:]  # 保留最近195行
-            content = "\n".join(header + ["", "...(更早的记录已省略)...", ""] + recent)
-        return content
-    return ""
-
 
 
 # ============================================================

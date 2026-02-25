@@ -133,57 +133,34 @@ def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
     worker_name = _load_boss_worker_name(boss_dir)
     if not worker_name:
         return ""
-    worker_tasks_dir = _worker_tasks_dir(worker_name)
-    worker_ongoing_dir = _worker_ongoing_dir(worker_name)
-    worker_reports_dir = _worker_reports_dir(worker_name)
-    pending_count = len(list(worker_tasks_dir.glob("*.md"))) if worker_tasks_dir.exists() else 0
-    ongoing_count = len(list(worker_ongoing_dir.glob("*.md"))) if worker_ongoing_dir.exists() else 0
-    completed_tasks_summary = _get_completed_tasks_summary(worker_name)
-    
-    # 获取 worker 的 reports 目录信息
-    reports_info = ""
-    if worker_reports_dir.exists():
-        report_files = sorted(worker_reports_dir.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if report_files:
-            reports_info = f"\n## Worker 的报告目录\n"
-            reports_info += f"报告目录路径: `{worker_reports_dir}`\n"
-            reports_info += f"报告文件列表（最近 {min(len(report_files), 10)} 个）:\n"
-            for i, report_file in enumerate(report_files[:10], 1):
-                reports_info += f"{i}. {report_file.name}\n"
-        else:
-            reports_info = f"\n## Worker 的报告目录\n"
-            reports_info += f"报告目录路径: `{worker_reports_dir}`\n"
-            reports_info += "（暂无报告文件）\n"
-    else:
-        reports_info = f"\n## Worker 的报告目录\n"
-        reports_info += f"报告目录路径: `{worker_reports_dir}`\n"
-        reports_info += "（目录不存在）\n"
-    
+
+    w_tasks = _worker_tasks_dir(worker_name)
+    w_ongoing = _worker_ongoing_dir(worker_name)
+    w_reports = _worker_reports_dir(worker_name)
+
+    # 精简的报告目录信息
+    reports_info = f"\n## Worker 报告目录\n路径: `{w_reports}`\n"
+    if w_reports.exists():
+        rfiles = sorted(w_reports.glob("*-report.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+        if rfiles:
+            reports_info += "\n".join(f"- {r.name}" for r in rfiles) + "\n"
+
     boss_name = boss_dir.name
-    boss_reports_dir = boss_dir / "reports"
-    from secretary.agents import load_agent_memory, _worker_memory_file
-    memory_content = load_agent_memory(boss_name)
+    from secretary.agents import _worker_memory_file
     memory_file_path = _worker_memory_file(boss_name)
-    memory_section = ""
-    if memory_content:
-        memory_section = "\n## 你的工作历史（Memory）\n" + memory_content + "\n"
-    memory_file_path_section = f"`{memory_file_path}`" if memory_file_path else "未提供"
+
     template = load_prompt("boss.md")
     return template.format(
         base_dir=cfg.BASE_DIR,
-        task_file=task_file,
         goal=goal,
         worker_name=worker_name,
-        worker_tasks_dir=worker_tasks_dir,
-        worker_ongoing_dir=worker_ongoing_dir,
-        worker_reports_dir=worker_reports_dir,
-        boss_reports_dir=boss_reports_dir,
-        pending_count=pending_count,
-        ongoing_count=ongoing_count,
-        completed_tasks_summary=completed_tasks_summary,
+        worker_tasks_dir=w_tasks,
+        worker_ongoing_dir=w_ongoing,
+        worker_reports_dir=w_reports,
+        boss_reports_dir=boss_dir / "reports",
+        completed_tasks_summary=_get_completed_tasks_summary(worker_name),
         reports_info=reports_info,
-        memory_section=memory_section,
-        memory_file_path=memory_file_path_section,
+        memory_file_path=f"`{memory_file_path}`" if memory_file_path else "",
     )
 
 
