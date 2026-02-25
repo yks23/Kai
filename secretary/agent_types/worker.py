@@ -60,29 +60,35 @@ def build_first_round_prompt(task_file: Path, report_dir: Path | None = None, ag
     )
 
 
-def build_continue_prompt(task_file: Path, report_dir: Path | None = None, agent_name: str | None = None) -> str:
-    """续轮提示词 — 从模板加载，简短指令"""
+def build_continue_prompt(
+    task_file: Path,
+    report_dir: Path | None = None,
+    agent_name: str | None = None,
+    task_deleted: bool = False,
+    elapsed_sec: float = 0,
+    min_time: int = 0,
+) -> str:
+    """续轮提示词（同时处理续轮和完善两种场景）"""
     from secretary.agents import _worker_reports_dir
     if report_dir is None and agent_name:
         report_dir = _worker_reports_dir(agent_name)
     effective_report_dir = report_dir or (BASE_DIR / "agents" / "unknown" / "reports")
+
+    if task_deleted and min_time > 0:
+        remaining = max(0, min_time - elapsed_sec)
+        status_section = (
+            f"- 任务已完成（文件已删除），但最低执行时间未达到\n"
+            f"- 已用 {elapsed_sec:.0f}s / 要求 {min_time}s（还需约 {remaining:.0f}s）\n\n"
+            f"利用剩余时间复查、补充测试、改善代码质量。不要为凑时间做无意义改动。\n"
+        )
+    else:
+        status_section = "- 任务文件仍存在，任务尚未完成\n"
+
     template = load_prompt("worker_continue.md")
-    return template.format(task_file=task_file, report_dir=effective_report_dir)
-
-
-def build_refine_prompt(elapsed_sec: float, min_time: int, report_dir: Path | None = None, agent_name: str | None = None) -> str:
-    """完善阶段提示词 — Agent 提前完成了但最低时间未到"""
-    from secretary.agents import _worker_reports_dir
-    remaining_sec = max(0, min_time - elapsed_sec)
-    if report_dir is None and agent_name:
-        report_dir = _worker_reports_dir(agent_name)
-    effective_report_dir = report_dir or (BASE_DIR / "agents" / "unknown" / "reports")
-    template = load_prompt("worker_refine.md")
     return template.format(
-        elapsed_sec=elapsed_sec,
-        min_time=min_time,
-        remaining_sec=remaining_sec,
+        task_file=task_file,
         report_dir=effective_report_dir,
+        status_section=status_section,
     )
 
 
@@ -104,29 +110,25 @@ def run_worker_first_round(task_file: Path, workspace: str = "", verbose: bool =
     )
 
 
-def run_worker_continue(task_file: Path, workspace: str = "", verbose: bool = True,
-                        timeout_sec: int | None = None, session_id: str = "", report_dir: Path | None = None, agent_name: str | None = None):
-    """续轮调用 Worker Agent — 使用 session_id 精确恢复会话"""
-    if not workspace:
+def run_worker_continue(
+    task_file: Path,
+    workspace: str = "",
+    verbose: bool = True,
+    timeout_sec: int | None = None,
+    session_id: str = "",
+    report_dir: Path | None = None,
+    agent_name: str | None = None,
+    task_deleted: bool = False,
+    elapsed_sec: float = 0,
+    min_time: int = 0,
+):
+    """续轮调用（含完善阶段）— 使用 session_id 恢复会话"""
+    if not workspace and not task_deleted:
         workspace = _try_parse_workspace(task_file)
-    prompt = build_continue_prompt(task_file, report_dir=report_dir, agent_name=agent_name)
-    from secretary.settings import get_model
-    from secretary.config import get_workspace
-    return run_agent(
-        prompt=prompt,
-        workspace=workspace or str(get_workspace()),
-        model=get_model(),
-        verbose=verbose,
-        session_id=session_id,
-        timeout=timeout_sec,
+    prompt = build_continue_prompt(
+        task_file, report_dir=report_dir, agent_name=agent_name,
+        task_deleted=task_deleted, elapsed_sec=elapsed_sec, min_time=min_time,
     )
-
-
-def run_worker_refine(elapsed_sec: float, min_time: int,
-                      workspace: str = "", verbose: bool = True,
-                      timeout_sec: int | None = None, session_id: str = "", report_dir: Path | None = None, agent_name: str | None = None):
-    """完善阶段调用 — Agent 已完成任务但最低执行时间未到，使用 session_id 继续优化"""
-    prompt = build_refine_prompt(elapsed_sec, min_time, report_dir=report_dir, agent_name=agent_name)
     from secretary.settings import get_model
     from secretary.config import get_workspace
     return run_agent(
@@ -176,7 +178,6 @@ class WorkerAgent(AgentType):
             termination=TerminationCondition.UNTIL_FILE_DELETED,
             first_round_prompt="worker_first_round.md",
             continue_prompt="worker_continue.md",
-            refine_prompt="worker_refine.md",
             use_ongoing=True,
             log_file=worker_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),

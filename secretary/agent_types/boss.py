@@ -310,7 +310,8 @@ class BossAgent(AgentType):
             ),
             termination=TerminationCondition.UNTIL_FILE_DELETED,  # Boss持续运行，处理完任务后继续循环
             first_round_prompt="boss.md",
-            use_ongoing=False,  # Boss不需要ongoing目录
+            continue_prompt="boss_continue.md",
+            use_ongoing=False,
             log_file=boss_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),
         )

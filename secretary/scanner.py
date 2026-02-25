@@ -43,7 +43,7 @@ import re
 import secretary.config as cfg
 from secretary.config import EXECUTABLE_TASK_TYPES
 from secretary.agent_config import AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig
-from secretary.agent_types.worker import run_worker_first_round, run_worker_continue, run_worker_refine
+from secretary.agent_types.worker import run_worker_first_round, run_worker_continue
 from secretary.agent_runner import RoundStats
 from secretary.agent_loop import run_loop, load_prompt
 from secretary.agent_types.secretary import run_secretary
@@ -400,35 +400,27 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
             round_timeout = _round_timeout_sec()
 
             if task_deleted:
-                # === 完善阶段: 任务已完成但 min_time 未到 ===
                 if elapsed >= min_time:
                     break
-                remaining = min_time - elapsed
-                # 完善阶段信息已写入日志，这里不再打印
-                result = run_worker_refine(
-                    elapsed_sec=elapsed,
-                    min_time=min_time,
-                    verbose=verbose,
+            
+            report_dir = config.output_dir if config else None
+            agent_name = config.name if config else None
+
+            if round_num == 1:
+                result = run_worker_first_round(
+                    ongoing_file, verbose=verbose,
                     timeout_sec=round_timeout,
-                    session_id=task_stats.session_id,  # 使用保存的 session_id
-                    agent_name=config.name if config else None,
-                    report_dir=config.output_dir if config else None,
+                    report_dir=report_dir, agent_name=agent_name,
                 )
-            elif round_num == 1:
-                # 首轮调用信息已写入日志，这里不再打印
-                report_dir = config.output_dir if config else None
-                result = run_worker_first_round(ongoing_file, verbose=verbose,
-                                                timeout_sec=round_timeout,
-                                                report_dir=report_dir,
-                                                agent_name=config.name if config else None)
             else:
-                # 续轮调用信息已写入日志，这里不再打印
-                report_dir = config.output_dir if config else None
-                result = run_worker_continue(ongoing_file, verbose=verbose,
-                    agent_name=config.name if config else None,
-                    report_dir=config.output_dir if config else None,
-                                             timeout_sec=round_timeout,
-                                             session_id=task_stats.session_id)  # 使用保存的 session_id
+                result = run_worker_continue(
+                    ongoing_file, verbose=verbose,
+                    timeout_sec=round_timeout,
+                    session_id=task_stats.session_id,
+                    report_dir=report_dir, agent_name=agent_name,
+                    task_deleted=task_deleted,
+                    elapsed_sec=elapsed, min_time=min_time,
+                )
 
             # 记录本轮统计 + 对话日志
             task_stats.add_round(

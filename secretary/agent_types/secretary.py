@@ -233,7 +233,8 @@ class SecretaryAgent(AgentType):
             ),
             termination=TerminationCondition.UNTIL_FILE_DELETED,
             first_round_prompt="secretary.md",
-            use_ongoing=False,  # secretary不使用ongoing
+            continue_prompt="secretary_continue.md",
+            use_ongoing=False,
             log_file=secretary_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),
         )

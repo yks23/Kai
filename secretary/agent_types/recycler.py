@@ -309,7 +309,8 @@ class RecyclerAgent(AgentType):
             ),
             termination=TerminationCondition.UNTIL_FILE_DELETED,  # Recycler持续运行，处理完报告后继续循环
             first_round_prompt="recycler.md",
-            use_ongoing=False,  # Recycler不需要ongoing目录
+            continue_prompt="recycler_continue.md",
+            use_ongoing=False,
             log_file=recycler_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),
         )

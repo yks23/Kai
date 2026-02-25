@@ -84,9 +84,8 @@ class AgentConfig:
     # 触发配置（有默认值）
     trigger: TriggerConfig = field(default_factory=lambda: TriggerConfig())
     
-    # 续轮和完善阶段提示词（有默认值）
+    # 续轮提示词（有默认值）
     continue_prompt: str | None = None
-    refine_prompt: str | None = None
     
     # 标签（用于日志，有默认值）
     label: str = ""
