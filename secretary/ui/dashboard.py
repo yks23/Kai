@@ -230,72 +230,76 @@ def print_status_line():
 # ============================================================
 
 def print_status_text():
-    """简化的状态输出：只显示agent及其任务统计和活跃进程"""
+    """状态快照：用 rich Table 显示 agent 列表和活跃进程"""
     from secretary.agents import list_workers
-    
+
     name = get_cli_name()
-    print(f"\n📊 {name} Agent状态")
-    print(f"   工作区: {cfg.BASE_DIR}\n")
-    
     workers = list_workers()
-    
-    if not workers:
-        print("   (无agent)")
-    else:
-        # 表头
-        print(f"{'Agent':<20} {'类型':<12} {'执行中':<10} {'已完成':<10} {'状态'}")
-        print("-" * 70)
-        
-        for w in workers:
-            agent_name = w.get("name", "unknown")
-            agent_type = w.get("type", "unknown")
-            executing = w.get("executing", False)
-            completed = w.get("completed_tasks", 0)
-            status_icon = {"idle": "💤", "busy": "⚙️", "offline": "📴"}.get(w.get("status", ""), "❓")
-            
-            # 类型图标
-            type_icons = {
-                "secretary": "🤖",
-                "worker": "👷",
-                "boss": "👔",
-                "recycler": "♻️",
-            }
-            type_icon = type_icons.get(agent_type, "❓")
-            
-            # 执行中显示勾或叉
-            executing_display = "✓" if executing else "✗"
-            
-            print(f"{type_icon} {agent_name:<17} {agent_type:<12} {executing_display:<10} {completed:<10} {status_icon}")
-    
-    # 显示活跃进程：完全基于全局队列
+
+    console = Console()
+    table = Table(
+        title=f"📊 {name} Agent 状态 — {cfg.BASE_DIR}",
+        box=box.ROUNDED,
+        title_style="bold",
+    )
+    table.add_column("Agent", style="cyan")
+    table.add_column("类型", style="magenta")
+    table.add_column("待办", justify="right", style="yellow")
+    table.add_column("进行", justify="right", style="blue")
+    table.add_column("完成", justify="right", style="green")
+    table.add_column("状态")
+    table.add_column("PID", justify="right", style="dim")
+
+    type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
+
     active_procs = []
     try:
         from secretary.cli import _get_active_processes, _sync_processes_to_queue
-        # 先同步agents.json到队列（确保队列完整）
         _sync_processes_to_queue()
-        # 然后从队列获取
         active_procs = _get_active_processes()
-        
-        if active_procs:
-            print(f"\n⚙️  活跃进程 ({len(active_procs)} 个):")
-            type_icons = {
-                "secretary": "🤖",
-                "worker": "👷",
-                "boss": "👔",
-                "recycler": "♻️",
-            }
-            for proc in active_procs:
-                icon = type_icons.get(proc.get("type", ""), "❓")
-                proc_name = proc.get("name", "unknown")
-                proc_type = proc.get("type", "unknown")
-                pid = proc.get("pid", 0)
-                print(f"   {icon} {proc_name:15s} ({proc_type}) PID={pid}")
-        else:
-            print(f"\n⚙️  活跃进程: 无")
     except Exception:
         pass
-    
-    print()
+    proc_pid_map = {p.get("name"): p.get("pid") for p in active_procs}
+
+    if not workers:
+        table.add_row("(无 agent)", "", "", "", "", "", "")
+    else:
+        for w in workers:
+            agent_name = w.get("name", "?")
+            agent_type = w.get("type", "?")
+            pending = w.get("pending_count", 0)
+            ongoing = w.get("ongoing_count", 0)
+            completed = w.get("completed_tasks", 0)
+            icon = type_icons.get(agent_type, "❓")
+            pid = proc_pid_map.get(agent_name) or w.get("pid")
+
+            status = w.get("status", "")
+            if pid:
+                try:
+                    import os
+                    os.kill(pid, 0)
+                    status_display = "[green]运行[/]"
+                except (OSError, ProcessLookupError):
+                    status_display = "[dim]💤 空闲[/]"
+                    pid = None
+            else:
+                status_display = "[dim]💤 空闲[/]"
+
+            table.add_row(
+                agent_name,
+                f"{icon} {agent_type}",
+                str(pending) if pending else "-",
+                str(ongoing) if ongoing else "-",
+                str(completed),
+                status_display,
+                str(pid) if pid else "-",
+            )
+
+    console.print()
+    console.print(table)
+
+    running_count = len([p for p in active_procs])
+    console.print(f"  [dim]活跃进程: {running_count} 个  |  {name} check <名> 查看日志[/]\n")
 
 
 # ============================================================

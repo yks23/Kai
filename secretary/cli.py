@@ -793,7 +793,7 @@ def cmd_hire(args):
 
 
 def cmd_workers(args):
-    """列出当前工作区内已注册的 agent（名称、类型、PID、状态等），与 kai monitor --text 对齐"""
+    """列出当前工作区内已注册的 agent"""
     if not _is_workspace_configured(args):
         print(t("workspace_not_set_hint").format(name=_cli_name()))
         return
@@ -802,39 +802,69 @@ def cmd_workers(args):
     workers = list_workers()
     name = _cli_name()
 
-    # 同步进程队列以便 PID 准确
     _sync_processes_to_queue()
     active_procs = _get_active_processes()
     proc_pid_map = {p.get("name"): p.get("pid") for p in active_procs}
 
-    type_icons = {
-        "secretary": "🤖",
-        "worker": "👷",
-        "boss": "👔",
-        "recycler": "♻️",
-    }
-    status_icons = {"idle": "💤", "busy": "⚙️", "offline": "📴"}
+    try:
+        from rich.console import Console
+        from rich.table import Table
+        from rich import box
 
-    print(f"\n📋 {name} 已注册 Agent")
-    print(f"   工作区: {cfg.BASE_DIR}\n")
-    if not workers:
-        print("   (无 agent，使用 kai hire 招募)")
-        return
-    # 表头与 monitor --text 列对齐，增加 PID
-    print(f"{'Agent':<18} {'类型':<12} {'执行中':<8} {'已完成':<8} {'状态':<4} {'PID':<8}")
-    print("-" * 62)
-    for w in workers:
-        agent_name = w.get("name", "unknown")
-        agent_type = w.get("type", "unknown")
-        executing = w.get("executing", False)
-        completed = w.get("completed_tasks", 0)
-        status_icon = status_icons.get(w.get("status", ""), "❓")
-        type_icon = type_icons.get(agent_type, "❓")
-        pid = proc_pid_map.get(agent_name) or w.get("pid")
-        pid_display = str(pid) if pid else "-"
-        exec_display = "✓" if executing else "✗"
-        print(f"{agent_name:<18} {type_icon} {agent_type:<10} {exec_display:<8} {completed:<8} {status_icon:<4} {pid_display:<8}")
-    print(f"\n   💡 查看日志: {name} check <名>  |  监控: {name} monitor  |  解雇: {name} fire <名>\n")
+        console = Console()
+        table = Table(
+            title=f"Agent 列表 — {cfg.BASE_DIR}",
+            box=box.ROUNDED,
+            show_lines=False,
+            title_style="bold",
+        )
+        table.add_column("Agent", style="cyan")
+        table.add_column("类型", style="magenta")
+        table.add_column("待办", justify="right", style="yellow")
+        table.add_column("进行", justify="right", style="blue")
+        table.add_column("完成", justify="right", style="green")
+        table.add_column("状态")
+        table.add_column("PID", justify="right", style="dim")
+
+        type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
+        status_map = {"idle": ("💤", "dim"), "busy": ("运行", "green"), "offline": ("离线", "red")}
+
+        if not workers:
+            console.print(f"\n  (无 agent，使用 {name} hire 招募)\n")
+            return
+
+        for w in workers:
+            agent_name = w.get("name", "?")
+            agent_type = w.get("type", "?")
+            pending = w.get("pending_count", 0)
+            ongoing = w.get("ongoing_count", 0)
+            completed = w.get("completed_tasks", 0)
+            pid = proc_pid_map.get(agent_name) or w.get("pid")
+            icon = type_icons.get(agent_type, "❓")
+
+            status_text, status_style = status_map.get(w.get("status", ""), ("❓", ""))
+            if pid and _check_process_exists(pid):
+                status_text, status_style = "运行", "green"
+
+            table.add_row(
+                agent_name,
+                f"{icon} {agent_type}",
+                str(pending) if pending else "-",
+                str(ongoing) if ongoing else "-",
+                str(completed),
+                f"[{status_style}]{status_text}[/]",
+                str(pid) if pid else "-",
+            )
+
+        console.print()
+        console.print(table)
+        console.print(f"  [dim]日志: {name} check <名>  |  监控: {name} monitor  |  解雇: {name} fire <名>[/]\n")
+    except ImportError:
+        # rich 不可用时退化为纯文本
+        print(f"\n📋 {name} Agent — {cfg.BASE_DIR}\n")
+        for w in workers:
+            print(f"  {w.get('name', '?'):16s} {w.get('type', '?'):10s} 完成={w.get('completed_tasks', 0)}")
+        print()
 
 
 def cmd_fire(args):
@@ -925,28 +955,23 @@ def cmd_recycle(args):
 
 
 def cmd_monitor(args):
-    """启动实时监控面板；--text/--once 时输出文本状态并退出，否则尝试 TUI（无 TUI 时退化为文本）"""
+    """监控面板。交互模式下默认输出文本快照（不阻塞），CLI 模式下启动 TUI。"""
     if not _is_workspace_configured(args):
         print(t("workspace_not_set_hint").format(name=_cli_name()))
     from secretary.ui.dashboard import run_monitor
-    import subprocess
-    import os
 
     text_mode = getattr(args, "text", False)
     once = getattr(args, "once", False)
+    interactive = getattr(args, "_interactive", False)
 
-    # 文本模式或单次快照：前台执行，输出与旧 status 等价的文本后退出
+    # 交互模式下默认输出文本快照，不阻塞
+    if interactive and not text_mode and not once:
+        text_mode = True
+
     if text_mode or once:
-        run_monitor(
-            refresh_interval=args.interval,
-            text_mode=text_mode,
-            once=once,
-        )
+        run_monitor(refresh_interval=args.interval, text_mode=True, once=True)
         return
 
-    # TUI 模式：前台执行（不 spawn 子进程），便于用户直接与面板交互
-    print(t("msg_starting_monitor"))
-    print(f"   刷新间隔 {args.interval}s，Ctrl+C 退出\n")
     run_monitor(refresh_interval=args.interval)
 
 
@@ -1111,183 +1136,105 @@ def _cleanup_all_processes():
 
 
 def cmd_check(args):
-    """实时查看 worker 或秘书的输出（类似 tail -f）"""
+    """实时查看 agent 日志（类似 tail -f），默认显示最后 20 行 + 实时跟踪"""
     from secretary.agents import get_worker, _worker_logs_dir, update_worker_status
     import threading
     import time
-    
+
     worker_name = getattr(args, "worker_name", None)
     if not worker_name:
-        print("❌ 请指定要查看的对象: agent 名称")
-        print(f"   用法: {_cli_name()} check <agent_name>")
-        print(f"   示例: {_cli_name()} check sen  |  {_cli_name()} check yks")
+        print(f"用法: {_cli_name()} check <agent_name>")
         return
-    
-    # 检查 agent 是否存在（统一处理所有类型，包括secretary）
+
     worker = get_worker(worker_name)
     if not worker:
         print(f"❌ Agent '{worker_name}' 不存在")
-        print(t("error_agent_not_found").format(name=_cli_name()))
         return
-    
-    # 检查 agent 是否在运行
+
+    agent_type = worker.get("type", "agent")
     pid = worker.get("pid")
-    pid_info = ""
-    if pid and _check_process_exists(pid):
-        pid_info = f" (PID={pid})"
-    else:
-        agent_type = worker.get("type", "agent")
-        print(f"ℹ️  {agent_type.capitalize()} '{worker_name}' 没有运行中的进程")
-        print(f"   使用 `{_cli_name()} hire {worker_name} {agent_type}` 启动")
-        # 即使没有运行，也允许查看日志
-    
-    # 统一使用 agents/<name>/logs/scanner.log
+    is_running = pid and _check_process_exists(pid)
+
     log_dir = _worker_logs_dir(worker_name)
-    if not log_dir.exists():
-        print(f"❌ Agent '{worker_name}' 的日志目录不存在")
-        return
-    
     log_file = log_dir / "scanner.log"
     if not log_file.exists():
-        print(f"❌ Agent '{worker_name}' 没有找到日志文件 (scanner.log)")
+        print(f"❌ 没有日志文件: {log_file}")
+        if not is_running:
+            print(f"   💡 先启动: {_cli_name()} hire {worker_name}")
         return
-    
-    agent_type = worker.get("type", "agent")
-    print(f"\n📺 实时查看 {agent_type} '{worker_name}' 的输出{pid_info}")
-    print(f"   日志文件: {log_file}")
-    print(f"   按 'q' 退出查看模式（不打断进程）")
-    print(f"   按 Ctrl+C 打断进程执行")
-    print(f"{'='*60}\n")
-    
-    # 用于控制循环的标志
-    should_exit = threading.Event()
-    should_stop_worker = threading.Event()
-    
-    def read_log():
-        """读取日志并实时显示"""
+
+    # ---- 头部信息 ----
+    type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
+    icon = type_icons.get(agent_type, "❓")
+    status_str = f"运行中 PID={pid}" if is_running else "未运行"
+    log_size = log_file.stat().st_size
+    size_str = f"{log_size / 1024:.1f}KB" if log_size > 1024 else f"{log_size}B"
+
+    print(f"\n{icon} {worker_name} ({agent_type}) — {status_str}")
+    print(f"   日志: {log_file} ({size_str})")
+    print(f"   Ctrl+C 退出" + (f" (不影响 agent 运行)" if is_running else ""))
+    print(f"{'─' * 60}")
+
+    # ---- 显示最后 N 行 ----
+    tail_n = getattr(args, "tail", 20) or 20
+    try:
+        all_lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if all_lines:
+            tail_start = max(0, len(all_lines) - tail_n)
+            if tail_start > 0:
+                print(f"  ... (省略前 {tail_start} 行)\n")
+            for line in all_lines[tail_start:]:
+                print(line)
+    except Exception:
+        pass
+
+    interactive = getattr(args, "_interactive", False)
+
+    # 交互模式 / agent 未运行：只显示 tail，不 follow
+    if interactive or not is_running:
+        print(f"{'─' * 60}")
+        if not is_running:
+            print(f"Agent 未运行。启动: {_cli_name()} hire {worker_name}")
+        elif interactive:
+            print(f"💡 实时跟踪: 在 CLI 下运行 {_cli_name()} check {worker_name}")
+        return
+
+    # CLI 模式 + agent 运行中：实时 follow
+    print(f"{'─' * 60}")
+    print(f"实时跟踪中… Ctrl+C 退出\n")
+
+    stop_event = threading.Event()
+
+    def _tail_follow():
         try:
-            # 先读取已有内容（可选：只显示最后几行）
-            tail_lines = getattr(args, "tail", None)
-            if tail_lines and tail_lines > 0:
-                # 读取最后 N 行
-                try:
-                    with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                        for line in lines[-tail_lines:]:
-                            print(line.rstrip())
-                except Exception:
-                    pass
-            
-            # 实时跟踪新内容（类似 tail -f）
             with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                # 如果不需要 tail，先读取所有已有内容
-                if not (tail_lines and tail_lines > 0):
-                    content = f.read()
-                    if content:
-                        print(content, end="")
-                
-                # 实时跟踪新内容
-                while not should_exit.is_set():
+                f.seek(0, 2)
+                while not stop_event.is_set():
                     line = f.readline()
                     if line:
                         print(line, end="", flush=True)
                     else:
-                        # 检查文件是否被截断或重新创建
                         try:
-                            current_size = log_file.stat().st_size
-                            if f.tell() > current_size:
-                                # 文件被截断，重新打开
+                            if f.tell() > log_file.stat().st_size:
                                 f.seek(0)
                         except Exception:
                             pass
-                        time.sleep(0.1)  # 短暂休眠，避免 CPU 占用过高
+                        time.sleep(0.1)
         except Exception as e:
-            if not should_exit.is_set():
-                print(f"\n⚠️  读取日志时出错: {e}")
-    
-    def read_input():
-        """监听键盘输入"""
-        if sys.platform == "win32":
-            # Windows: 使用 msvcrt
-            try:
-                import msvcrt
-                while not should_exit.is_set():
-                    if msvcrt.kbhit():
-                        key = msvcrt.getch()
-                        if key == b'q' or key == b'Q':
-                            should_exit.set()
-                            break
-                        elif key == b'\x03':  # Ctrl+C
-                            should_stop_worker.set()
-                            should_exit.set()
-                            break
-                    time.sleep(0.1)
-            except ImportError:
-                # 如果 msvcrt 不可用，提示用户使用 Ctrl+C
-                print("   ⚠️  键盘输入监听不可用，请使用 Ctrl+C 退出")
-                while not should_exit.is_set():
-                    time.sleep(0.1)
-            except KeyboardInterrupt:
-                should_stop_worker.set()
-                should_exit.set()
-            except Exception:
-                # 其他错误，继续运行（至少 Ctrl+C 能工作）
-                while not should_exit.is_set():
-                    time.sleep(0.1)
-        else:
-            # Unix/Linux: 尝试使用 termios，如果失败则使用简单方式
-            try:
-                import select
-                import termios
-                import tty
-                
-                # 设置终端为原始模式
-                old_settings = termios.tcgetattr(sys.stdin)
-                try:
-                    tty.setraw(sys.stdin.fileno())
-                    while not should_exit.is_set():
-                        if select.select([sys.stdin], [], [], 0.1)[0]:
-                            key = sys.stdin.read(1)
-                            if key == 'q' or key == 'Q':
-                                should_exit.set()
-                                break
-                            elif key == '\x03':  # Ctrl+C
-                                should_stop_worker.set()
-                                should_exit.set()
-                                break
-                finally:
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-            except (ImportError, OSError, AttributeError):
-                # 如果 termios 不可用，使用简单方式（只支持 Ctrl+C）
-                pass
-    
-    # 启动日志读取线程
-    log_thread = threading.Thread(target=read_log, daemon=True)
-    log_thread.start()
-    
-    # 启动输入监听线程
-    input_thread = threading.Thread(target=read_input, daemon=True)
-    input_thread.start()
-    
+            if not stop_event.is_set():
+                print(f"\n⚠️  读取日志出错: {e}")
+
+    tail_thread = threading.Thread(target=_tail_follow, daemon=True)
+    tail_thread.start()
+
     try:
-        # 等待退出信号
-        while not should_exit.is_set():
-            time.sleep(0.1)
+        while not stop_event.is_set():
+            time.sleep(0.2)
     except KeyboardInterrupt:
-        # Ctrl+C 被捕获，停止 worker
-        should_stop_worker.set()
-        should_exit.set()
-    
-    agent_type = worker.get("type", "agent")
-    if should_stop_worker.is_set() and pid:
-        print(f"\n\n🛑 正在停止 {agent_type} '{worker_name}' (PID={pid})...")
-        _stop_process(pid, worker_name)
-        update_worker_status(worker_name, "idle", pid=None)
-    else:
-        if pid:
-            print(f"\n\n👋 退出查看模式（{agent_type} '{worker_name}' 继续运行）")
-        else:
-            print(f"\n\n👋 退出查看模式")
+        stop_event.set()
+
+    print(f"\n{'─' * 60}")
+    print(f"👋 退出查看（{worker_name} 继续运行）")
 
 
 def cmd_clean_logs(args):
@@ -1741,7 +1688,7 @@ def _print_command_list(name: str):
 # ============================================================
 
 def _run_interactive_loop(parser, initial_args, handlers, skill_names):
-    """无子命令时进入：支持短命令 task/stop/status、exit、monitor。"""
+    """无子命令时进入交互模式。"""
     if initial_args.workspace:
         ws = Path(initial_args.workspace).resolve()
         cfg.apply_workspace(ws)
@@ -1749,46 +1696,25 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     name = _cli_name()
     prompt = f"{name}> "
 
-    # 确保目录结构存在
     cfg.ensure_dirs()
-    
-    # 初始化 agent 类型注册表（在交互模式启动时自动加载自定义类型）
+
     try:
         from secretary.agent_registry import initialize_registry
         initialize_registry(cfg.CUSTOM_AGENTS_DIR)
     except Exception:
-        pass  # 如果初始化失败，不影响其他功能
-    
-    # 恢复所有已注册的agent（它们的状态已经在agents.json中）
-    from secretary.agents import list_workers
-    
-    all_agents = list_workers()
-    if all_agents:
-        print(f"   📋 检测到 {len(all_agents)} 个已注册的agent")
-    
-    # 自动启动所有已注册但未运行的agents
-    try:
-        started_count = _auto_start_agents(silent=True)
-        # 即使静默启动，也显示启动的agent数量（如果有）
-        # 这样用户知道系统正在工作
-        if started_count > 0:
-            print(f"   🔄 已自动启动 {started_count} 个agent扫描器")
-    except Exception as e:
-        # 自动启动失败不应该影响交互模式，但记录错误以便调试
-        # 在交互模式下，静默处理错误，避免影响用户体验
-        # 如果需要调试，可以查看日志文件或使用非静默模式
         pass
-    
-    # 打印欢迎信息 + 首次状态栏
-    print(f"\n🔄 {name} 交互模式 — 输入子命令，monitor 监控面板")
-    print(f"   {t('interactive_welcome')}")
+
+    # 简洁的欢迎信息
+    from secretary.agents import list_workers
+    agents = list_workers()
+    agent_summary = f"{len(agents)} 个 agent" if agents else "无 agent"
+    print(f"\n{name} — {agent_summary} | help 帮助 | exit 退出")
+
+    # 后台静默启动空闲 agents
     try:
-        from secretary.ui.dashboard import print_status_line
-        print_status_line()
+        _auto_start_agents(silent=True)
     except Exception:
         pass
-    
-    print()
 
     while True:
         try:
@@ -1798,26 +1724,13 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             print()  # 换行，避免提示符粘在 ^C 后面
             continue
         except EOFError:
-            # Ctrl+D: 退出
-            print(f"👋 退出 {name}")
-            _cleanup_all_processes()
-            print()
+            print(f"\n👋 退出")
             break
         if not line:
             continue
-        if line.lower() == "exit":
-            print(f"👋 退出 {name}")
-            # 清理所有正在运行的扫描进程
-            _cleanup_all_processes()
-            print()
+        if line.lower() in ("exit", "quit", "q"):
+            print(f"👋 退出")
             break
-        if line.lower() == "bar":
-            try:
-                from secretary.ui.dashboard import print_status_line
-                print_status_line()
-            except Exception as e:
-                print(f"   ⚠️ {e}")
-            continue
 
         try:
             parts = shlex.split(line)
@@ -1854,10 +1767,10 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
         try:
             args = parser.parse_args(parts)
         except SystemExit:
-            print("   ❓ 未知命令或参数错误，请重试")
+            print(f"  未知命令。输入 help 查看可用命令")
             continue
         if not getattr(args, "command", None):
-            print("   ❓ 请输入子命令，如 task / stop / monitor / skills")
+            print(f"  输入 help 查看可用命令")
             continue
 
         # base / name / model / help 不需要 ensure_dirs
@@ -1870,9 +1783,8 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
         # 刷新可用技能列表 (用户可能刚 learn 了新技能)
         _refresh_skill_names(skill_names)
 
-        # 根据命令类型自动判断执行方式
-        # 持续运行的命令已经在各自的 cmd_* 函数中处理后台执行
-        # 这里直接调用 handler，让命令自己决定是前台还是后台执行
+        # 标记交互模式，让阻塞型命令自动调整行为
+        args._interactive = True
         try:
             handlers[args.command](args)
         except SystemExit as e:

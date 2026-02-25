@@ -376,21 +376,11 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
     # 使用配置的标签，如果没有配置则使用默认
     label = config.label if config else f"👷 {task_name}"
     
-    # 开始处理任务信息直接输出
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*60}")
-    print(f"[{ts}] ⚙️ 开始处理任务: {ongoing_file.name} (PID={_PID})")
-    print(f"{'='*60}")
-    print(f"   任务文件: {ongoing_file}")
-    if ongoing_file.exists():
-        file_size = ongoing_file.stat().st_size
-        print(f"   文件大小: {file_size} 字节")
-    if min_time > 0:
-        print(f"   ⏱️ 最低执行时间: {min_time}s")
-    if config:
-        print(f"   Agent: {config.name} ({config.label})")
-    
-    # 任务开始信息已写入日志，这里不再打印（后台运行时会被丢弃）
+    ts = datetime.now().strftime("%H:%M:%S")
+    size = ongoing_file.stat().st_size if ongoing_file.exists() else 0
+    agent_label = f" ({config.name})" if config else ""
+    min_info = f" min={min_time}s" if min_time > 0 else ""
+    print(f"\n[{ts}] ⚙️ 任务: {ongoing_file.name}{agent_label} ({size}B{min_info})")
 
     task_deleted = False  # Agent 是否已经删除了任务文件
 
@@ -447,40 +437,32 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
                 readable_output=result.output,
             )
             
-            # 记录本轮信息直接输出
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ts = datetime.now().strftime("%H:%M:%S")
+            elapsed = time.time() - task_stats._wall_start
             if task_deleted:
-                elapsed = time.time() - task_stats._wall_start
                 remaining = min_time - elapsed if min_time > 0 else 0
-                print(f"\n[{ts}] 🔄 第 {round_num} 轮: 完善阶段 (--resume)")
-                print(f"   已用 {elapsed:.0f}s / {min_time}s, 还需 {remaining:.0f}s")
+                print(f"[{ts}] R{round_num} 完善 {elapsed:.0f}s/{min_time}s 剩余{remaining:.0f}s")
             elif round_num == 1:
-                print(f"\n[{ts}] 🚀 第 1 轮: 首轮调用 (新会话)")
+                print(f"[{ts}] R1 首轮")
             else:
-                print(f"\n[{ts}] 🔄 第 {round_num} 轮: 续轮调用 (--resume {task_stats.session_id[:8] if task_stats.session_id else 'N/A'}...)")
-            
-            if not result.success:
-                print(f"   ⚠️ Agent 本轮出错 (code={result.return_code})")
-                print(f"   错误信息: {result.output[:200]}")
+                sid = task_stats.session_id[:8] if task_stats.session_id else "?"
+                print(f"[{ts}] R{round_num} 续轮 ({sid}…)")
 
-            # 检查: Agent 是否已经删除了任务文件
+            if not result.success:
+                print(f"   ⚠️ 出错 code={result.return_code}: {result.output[:150]}")
+
             if not task_deleted and not ongoing_file.exists():
                 task_deleted = True
                 elapsed = time.time() - task_stats._wall_start
-
-                # 记录任务文件删除直接输出
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"\n[{ts}] ✅ 任务文件已删除 (Agent认为完成)")
-                if min_time > 0 and elapsed < min_time:
-                    remaining = min_time - elapsed
-                    print(f"   ⏱️ 但最低时间未到 ({elapsed:.0f}s / {min_time}s)，进入完善阶段，还需 {remaining:.0f}s")
+                ts = datetime.now().strftime("%H:%M:%S")
 
                 if min_time > 0 and elapsed < min_time:
-                    remaining = min_time - elapsed
+                    print(f"[{ts}] ✅ 任务完成，进入完善阶段 ({elapsed:.0f}s/{min_time}s)")
                     time.sleep(cfg.WORKER_RETRY_INTERVAL)
                     continue
                 else:
-                    break  # 正常完成 (无 min_time 或已达标)
+                    print(f"[{ts}] ✅ 任务完成")
+                    break
 
             if task_deleted:
                 # 完善阶段轮结束，检查时间
@@ -490,33 +472,16 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
                 time.sleep(cfg.WORKER_RETRY_INTERVAL)
                 continue
 
-            # Agent 自然停止了但文件还在 → 还没完成，必须进入下一轮
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            elapsed = time.time() - task_stats._wall_start
-            if result.success:
-                print(f"\n[{ts}] ℹ️ Agent 本轮正常结束，但任务文件仍存在 → 任务未完成")
-            else:
-                print(f"\n[{ts}] ⚠️ Agent 本轮出错 (code={result.return_code})")
-                print(f"   错误信息: {result.output[:200]}")
-            if min_time > 0:
-                print(f"   ⏱️ 最低执行时间未到 ({elapsed:.0f}s / {min_time}s)，将续轮直至时间用尽或任务完成")
-            print(f"   {cfg.WORKER_RETRY_INTERVAL}s 后用 --resume 续轮...")
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] ↻ 任务未完成，{cfg.WORKER_RETRY_INTERVAL}s 后续轮…")
             time.sleep(cfg.WORKER_RETRY_INTERVAL)
 
-        # 任务完成
         task_stats.success = True
         task_stats.mark_end()
 
-        # 任务完成信息直接输出
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{ts}] ✅ 任务完成: {task_name} (PID={_PID})")
-        print(f"   共执行 {round_num} 轮"
-              f" | 墙钟用时 {task_stats.wall_clock_sec:.1f}s"
-              f" | Agent用时 {task_stats.total_duration_sec:.1f}s"
-              f" | Tool Calls {task_stats.total_tool_calls} 次"
-              f" | 涉及 {len(task_stats.all_files_changed)} 个文件")
-        if min_time > 0:
-            print(f"   ⏱️ 最低执行时间: {min_time}s (实际: {task_stats.wall_clock_sec:.1f}s)")
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"\n[{ts}] ✅ {task_name} | {round_num}轮 {task_stats.wall_clock_sec:.1f}s "
+              f"| {task_stats.total_tool_calls} calls | {len(task_stats.all_files_changed)} files")
         _print_report(task_name, config)
         # 使用配置的 stats_dir，无 config 时使用 ongoing 同级的 stats
         stats_dir = config.stats_dir if config else ongoing_file.parent / "stats"
@@ -529,9 +494,8 @@ def process_ongoing_task(ongoing_file: Path, verbose: bool = True, config: Agent
         task_stats.mark_end()
         stats_dir = config.stats_dir if config else ongoing_file.parent / "stats"
         _write_scanner_report(task_stats, stats_dir)
-        # 不抛出异常，让 scanner 循环继续处理下一个任务
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{ts}] ❌ 处理任务时发生异常: {ongoing_file.name} | 错误: {e}")
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"\n[{ts}] ❌ {ongoing_file.name}: {e}")
         traceback.print_exc()
 
 
@@ -719,16 +683,6 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
             all_md = list(config.input_dir.glob("*.md"))
             executable = [p for p in all_md if _is_executable_task(p)]
             
-            # 文件检查详情直接输出（用于debug）
-            if all_md:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"\n[{ts}] 📋 文件检查详情:")
-                for f in all_md[:5]:  # 最多显示5个
-                    scope = _get_task_execution_scope(f)
-                    is_exec = _is_executable_task(f)
-                    print(f"   - {f.name}: scope={scope}, executable={is_exec}")
-                print(f"   可执行文件数: {len(executable)}/{len(all_md)}")
-            
             if executable:
                 # 按修改时间排序，返回最早的文件
                 return [sorted(executable, key=lambda p: p.stat().st_mtime)[0]]
@@ -876,103 +830,47 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
     update_worker_status(config.name, "busy", pid=_PID)
 
     label = config.label
-    # 启动信息直接输出（会被重定向到日志文件）
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print("\n" + "=" * 60)
-    print(f"[{ts}] {label} 启动 (PID={_PID})")
-    print(f"   输入目录: {config.input_dir}")
-    if config.use_ongoing:
-        print(f"   处理目录: {config.processing_dir}")
-    print(f"   输出目录: {config.output_dir}")
-    print(f"   统计目录: {config.stats_dir}")
-    print(f"   扫描间隔: {cfg.SCAN_INTERVAL}s")
-    print(f"   模式: {'单次' if once else '持续运行（循环直到 Ctrl+C）'}")
-    print(f"   终止条件: {config.termination.value}")
-    print("=" * 60 + "\n")
+    ts = datetime.now().strftime("%H:%M:%S")
+    mode = "单次" if once else f"持续 (间隔 {cfg.SCAN_INTERVAL}s)"
+    print(f"\n[{ts}] {label} 启动 PID={_PID} | {mode}")
+    print(f"   tasks: {config.input_dir.name}/ → reports: {config.output_dir.name}/")
 
     def trigger_fn():
         try:
             result = _unified_trigger(config)
         except Exception as e:
-            # 触发检查时的异常直接输出
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] ❌ 触发检查异常: {e}")
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] ❌ 触发检查异常: {e}")
             traceback.print_exc()
-            # 返回空列表，避免崩溃
             result = []
-        
-        # 每30秒记录一次触发检查状态（用于debug）
-        import time
-        current_time = time.time()
-        if not hasattr(trigger_fn, '_last_log_time'):
-            trigger_fn._last_log_time = 0
-        
-        should_log = False
+
         if result:
-            should_log = True
-        elif current_time - trigger_fn._last_log_time >= 30:
-            should_log = True
-            trigger_fn._last_log_time = current_time
-        
-        if should_log:
-            trigger_info = _get_trigger_debug_info(config)
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if result:
-                print(f"\n[{ts}] 🔔 触发: {len(result)} 个文件 | {trigger_info}")
-            else:
-                print(f"\n[{ts}] 🔍 未触发: {trigger_info}")
-            if result:
-                trigger_fn._last_log_time = current_time
-        
+            ts = datetime.now().strftime("%H:%M:%S")
+            names = ", ".join(f.name for f in result[:3])
+            print(f"\n[{ts}] 🔔 触发: {names}")
+
         return result
 
     def process_fn(file_path: Path):
-        # 设置执行状态为 True
         from secretary.agents import set_agent_executing, increment_completed_tasks
         set_agent_executing(config.name, True)
-        
-        # 每次触发就增加已完成计数（触发函数的调用次数）
         increment_completed_tasks(config.name)
-        
-        # 触发处理信息直接输出
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{ts}] 🔔 触发处理: {file_path.name}")
-        print(f"   文件路径: {file_path}")
-        print(f"   文件存在: {file_path.exists()}")
-        if file_path.exists():
-            file_size = file_path.stat().st_size
-            scope = _get_task_execution_scope(file_path)
-            is_exec = _is_executable_task(file_path)
-            print(f"   文件大小: {file_size} 字节")
-            print(f"   execution_scope: {scope}, executable: {is_exec}")
-        print(f"   终止条件: {config.termination.value}")
-        
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        size = file_path.stat().st_size if file_path.exists() else 0
+        print(f"[{ts}] ▶ 处理: {file_path.name} ({size}B)")
+
         try:
             _process_one_unified(config, file_path, verbose)
         except Exception as e:
-            # 异常信息直接输出，但不抛出异常，让循环继续
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] ❌ 处理任务异常: {file_path.name} | 错误: {e}")
-            print(f"   异常类型: {type(e).__name__}")
-            print(f"   文件路径: {file_path}")
-            print(f"   完整异常信息:")
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] ❌ {file_path.name}: {e}")
             traceback.print_exc()
         finally:
-            # 处理完成（无论成功或失败）都清除执行状态
             set_agent_executing(config.name, False)
 
     def on_idle():
-        # 空闲状态每30秒记录一次
-        import time
-        current_time = time.time()
-        if not hasattr(on_idle, '_last_log_time'):
-            on_idle._last_log_time = 0
-        
-        if current_time - on_idle._last_log_time >= 30:
-            on_idle._last_log_time = current_time
-            trigger_info = _get_trigger_debug_info(config)
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] 🔍 触发检查: {trigger_info}")
+        pass  # 空闲时不打印，减少日志噪音
 
     def on_exit():
         if config.termination == TerminationCondition.UNTIL_FILE_DELETED:
