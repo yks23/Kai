@@ -270,59 +270,16 @@ def run_recycler(once: bool = False, verbose: bool = True, recycler_name: str = 
 class RecyclerAgent(AgentType):
     """Recycler Agent 类型"""
     
-    @property
-    def name(self) -> str:
-        return "recycler"
-    
-    @property
-    def label_template(self) -> str:
-        return "♻️ {name}"
-    
-    @property
-    def prompt_template(self) -> str:
-        return "recycler.md"
-    
+    name = "recycler"
+    icon = "♻️"
+    first_prompt = "recycler.md"
+    continue_prompt = "recycler_continue.md"
+
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
-        """
-        构建 Recycler 的配置
-        
-        Recycler的触发规则：扫描所有agent的reports/目录，查找*-report.md文件
-        """
-        recycler_dir = base_dir / "agents" / agent_name
-        
-        def recycler_trigger_fn(config: AgentConfig) -> List[Path]:
-            """Recycler的触发函数：扫描所有agent的reports目录"""
-            return _find_report_files()
-        
-        return AgentConfig(
-            name=agent_name,
-            base_dir=recycler_dir,
-            input_dir=recycler_dir / "tasks",
-            processing_dir=recycler_dir / "ongoing",
-            output_dir=recycler_dir / "reports",
-            logs_dir=recycler_dir / "logs",
-            stats_dir=recycler_dir / "stats",
-            trigger=TriggerConfig(
-                watch_dirs=[],  # Recycler不使用标准目录监视，使用自定义函数扫描所有reports
-                condition=TriggerCondition.HAS_FILES,
-                custom_trigger_fn=recycler_trigger_fn,
-            ),
-            termination=TerminationCondition.UNTIL_FILE_DELETED,  # Recycler持续运行，处理完报告后继续循环
-            first_round_prompt="recycler.md",
-            continue_prompt="recycler_continue.md",
-            use_ongoing=False,
-            log_file=recycler_dir / "logs" / "scanner.log",
-            label=self.label_template.format(name=agent_name),
-        )
-    
+        config = super().build_config(base_dir, agent_name)
+        config.trigger = TriggerConfig(custom_trigger_fn=lambda _: _find_report_files())
+        return config
+
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
-        """
-        处理 Recycler 任务
-        
-        流程：
-        1. task_file 实际上是报告文件路径
-        2. 调用 process_report 审查报告
-        """
-        # Recycler 的 task_file 实际上是报告文件
         process_report(task_file, recycler_config=config, verbose=verbose)
 

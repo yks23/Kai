@@ -1,12 +1,5 @@
 """
-Secretary Agent 类型定义与执行逻辑
-
-Secretary 负责任务的分类、归并和分配，特点：
-- 目录结构：统一的 input_dir (tasks/), processing_dir (ongoing/), output_dir (reports/)
-- 触发规则：input_dir 目录有文件时触发
-- 终止条件：单次执行后终止
-- 处理逻辑：读取任务，调用 run_secretary 处理，将分配结果写入 worker 的 input_dir
-- 会话管理：每次都是新会话（单次执行）
+Secretary Agent — 任务分类、归并和分配
 """
 import shutil
 import traceback
@@ -16,15 +9,8 @@ from datetime import datetime
 import secretary.config as cfg
 from secretary.agent_loop import load_prompt
 from secretary.agent_runner import run_agent
-from secretary.agent_config import (
-    AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig
-)
+from secretary.agent_config import AgentConfig
 from secretary.agent_types.base import AgentType
-
-
-# ============================================================
-#  秘书执行逻辑（供 scanner 与类型内部使用）
-# ============================================================
 
 def get_goals(secretary_name: str) -> list:
     """获取当前全局目标列表（供 CLI 列出）"""
@@ -197,96 +183,23 @@ def run_secretary(user_request: str, verbose: bool = True, secretary_name: str =
     return result.success
 
 
-# ============================================================
-#  Agent 类型定义
-# ============================================================
-
 class SecretaryAgent(AgentType):
-    """Secretary Agent 类型"""
-    
-    @property
-    def name(self) -> str:
-        return "secretary"
-    
-    @property
-    def label_template(self) -> str:
-        return "🤖 {name}"
-    
-    @property
-    def prompt_template(self) -> str:
-        return "secretary.md"
-    
-    def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
-        """构建 Secretary 的配置"""
-        secretary_dir = base_dir / "agents" / agent_name
-        return AgentConfig(
-            name=agent_name,
-            base_dir=secretary_dir,
-            input_dir=secretary_dir / "tasks",
-            processing_dir=secretary_dir / "ongoing",  # secretary不使用ongoing，但保留目录结构
-            output_dir=secretary_dir / "reports",
-            logs_dir=secretary_dir / "logs",
-            stats_dir=secretary_dir / "stats",
-            trigger=TriggerConfig(
-                watch_dirs=[secretary_dir / "tasks"],
-                condition=TriggerCondition.HAS_FILES,
-            ),
-            termination=TerminationCondition.UNTIL_FILE_DELETED,
-            first_round_prompt="secretary.md",
-            continue_prompt="secretary_continue.md",
-            use_ongoing=False,
-            log_file=secretary_dir / "logs" / "scanner.log",
-            label=self.label_template.format(name=agent_name),
-        )
-    
+    """Secretary Agent — 使用自定义 build_prompt 注入 worker 信息和目标"""
+    name = "secretary"
+    icon = "🤖"
+    first_prompt = "secretary.md"
+    continue_prompt = "secretary_continue.md"
+
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
-        """
-        处理 Secretary 任务
-        
-        流程：
-        1. 读取任务内容
-        2. 移动到 assigned/ 目录
-        3. 调用 run_secretary 处理
-        """
-        if config.output_dir is None or config.log_file is None:
-            print(f"⚠️ [{config.label}] 缺少 output_dir 或 log_file")
-            return
-        
+        """读取任务 → 移动到 reports/ → 调用 run_secretary"""
         try:
             request = task_file.read_text(encoding="utf-8").strip()
-        except Exception as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] ❌ 读取任务文件失败: {task_file.name} | 错误: {e}")
-            traceback.print_exc()
-            if task_file.exists():
-                error_file = config.output_dir / f"error-{task_file.name}"
-                shutil.move(str(task_file), str(error_file))
+        except Exception:
             return
-
-        assigned_file = config.output_dir / task_file.name
+        # 移动任务文件到 reports/ 存档
         try:
-            shutil.move(str(task_file), str(assigned_file))
-        except Exception as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] ❌ 移动任务文件失败: {task_file.name} | 错误: {e}")
-            traceback.print_exc()
-            return
-
-        # 直接运行，输出会自动重定向到日志文件
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print("\n" + "=" * 60)
-        print(f"[{ts}] 处理任务: {task_file.name}")
-        print("=" * 60 + "\n")
-        try:
-            secretary_name = config.name
-            run_secretary(request, verbose=True, secretary_name=secretary_name)
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print("\n" + "=" * 60)
-            print(f"[{ts}] 任务完成: {task_file.name}")
-            print("=" * 60 + "\n")
-        except Exception as e:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts}] ⚠️ 处理任务时发生错误: {e}")
-            traceback.print_exc()
-            raise
+            shutil.move(str(task_file), str(config.output_dir / task_file.name))
+        except Exception:
+            pass
+        run_secretary(request, verbose=verbose, secretary_name=config.name)
 

@@ -222,109 +222,36 @@ def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True) -> bool:
     return result.success
 
 
-# ============================================================
-#  Agent 类型定义
-# ============================================================
-
 class BossAgent(AgentType):
-    """Boss Agent 类型"""
-    
-    @property
-    def name(self) -> str:
-        return "boss"
-    
-    @property
-    def label_template(self) -> str:
-        return "👔 {name}"
-    
-    @property
-    def prompt_template(self) -> str:
-        return "boss.md"
-    
+    """Boss Agent — 覆盖 build_config 添加自定义触发逻辑"""
+    name = "boss"
+    icon = "👔"
+    first_prompt = "boss.md"
+    continue_prompt = "boss_continue.md"
+
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
-        """
-        构建 Boss 的配置
-        
-        Boss的触发规则：检查所监视worker的tasks/和ongoing/是否为空
-        如果为空，直接触发（不创建触发文件）
-        """
-        boss_dir = base_dir / "agents" / agent_name
-        
-        # Boss使用自定义触发函数
-        def boss_trigger_fn(config: AgentConfig) -> List[Path]:
-            """
-            Boss的触发函数：
-            1. 检查自己的 tasks/（goal.md）是否有内容，或
-            2. 检查监控的 worker 的 reports/ 是否有新的 reports
-            """
-            worker_name = _load_boss_worker_name(config.base_dir)
+        config = super().build_config(base_dir, agent_name)
+
+        def boss_trigger_fn(cfg_: AgentConfig) -> List[Path]:
+            worker_name = _load_boss_worker_name(cfg_.base_dir)
             if not worker_name:
                 return []
-            
-            # 检查自己的 tasks/（全局目标，通常是 goal.md）
-            boss_tasks_dir = config.input_dir
-            if boss_tasks_dir.exists():
-                goal_files = list(boss_tasks_dir.glob("*.md"))
-                if goal_files:
-                    # 有自己的任务（全局目标），触发
-                    return [config.base_dir / ".boss_trigger_marker"]
-            
-            # 也检查 goal.md 文件（如果存在）
-            goal_file = config.base_dir / "goal.md"
+            marker = cfg_.base_dir / ".boss_trigger_marker"
+            # goal.md 存在 → 触发
+            goal_file = cfg_.base_dir / "goal.md"
             if goal_file.exists() and goal_file.stat().st_size > 0:
-                return [config.base_dir / ".boss_trigger_marker"]
-            
-            # 检查监控的 worker 的 reports/ 是否有新的 reports
-            worker_reports_dir = _worker_reports_dir(worker_name)
-            if worker_reports_dir.exists():
-                # 获取最近处理的报告文件时间戳（从 stats 目录）
-                last_processed_time = _get_last_processed_report_time(config.base_dir)
-                
-                # 查找新的报告文件
-                report_files = sorted(
-                    worker_reports_dir.glob("*-report.md"),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True
-                )
-                
-                for report_file in report_files:
-                    if report_file.stat().st_mtime > last_processed_time:
-                        # 发现新报告，触发
-                        return [config.base_dir / ".boss_trigger_marker"]
-            
+                return [marker]
+            # worker reports 有新报告 → 触发
+            w_reports = _worker_reports_dir(worker_name)
+            if w_reports.exists():
+                cutoff = _get_last_processed_report_time(cfg_.base_dir)
+                if any(r.stat().st_mtime > cutoff for r in w_reports.glob("*-report.md")):
+                    return [marker]
             return []
-        
-        return AgentConfig(
-            name=agent_name,
-            base_dir=boss_dir,
-            input_dir=boss_dir / "tasks",  # Boss 自己的 tasks，用于接收全局目标
-            processing_dir=boss_dir / "ongoing",  # 不使用
-            output_dir=boss_dir / "reports",  # Boss 自己的报告目录
-            logs_dir=boss_dir / "logs",
-            stats_dir=boss_dir / "stats",
-            trigger=TriggerConfig(
-                watch_dirs=[],  # Boss不使用标准目录监视，使用自定义函数
-                condition=TriggerCondition.HAS_FILES,
-                create_virtual_file=False,  # 不创建触发文件
-                custom_trigger_fn=boss_trigger_fn,
-            ),
-            termination=TerminationCondition.UNTIL_FILE_DELETED,  # Boss持续运行，处理完任务后继续循环
-            first_round_prompt="boss.md",
-            continue_prompt="boss_continue.md",
-            use_ongoing=False,
-            log_file=boss_dir / "logs" / "scanner.log",
-            label=self.label_template.format(name=agent_name),
-        )
-    
+
+        config.trigger = TriggerConfig(custom_trigger_fn=boss_trigger_fn)
+        return config
+
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
-        """
-        处理 Boss 任务
-        
-        流程：
-        1. 检查是否是触发标记（.boss_trigger_marker）
-        2. 直接调用 run_boss 处理（不需要实际文件，只检查目录是否为空）
-        """
-        # Boss使用触发标记，直接处理，不需要文件存在
-        # task_file 只是标记，实际处理时重新检查目录状态
         run_boss(task_file, config.base_dir, verbose=verbose)
 
