@@ -92,7 +92,6 @@ class WorkerAgent(AgentType):
     first_prompt = "worker_first_round.md"
     continue_prompt = "worker_continue.md"
     use_ongoing = True
-    known_agent_types = []  # worker 不调用其他 agent
 
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
         """Worker 特殊处理：移动到 ongoing/ 后进入多轮对话循环"""

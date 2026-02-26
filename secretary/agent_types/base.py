@@ -4,7 +4,6 @@ Agent 类型基类
 自定义一个 agent 类型只需：
   1. 继承 AgentType
   2. 设置 name / icon / first_prompt / continue_prompt
-  3. 可选设置 known_agent_types 声明能调用哪些类型的 agent
 
 最简示例：
 
@@ -13,9 +12,11 @@ Agent 类型基类
         icon = "🔍"
         first_prompt = "reviewer.md"
         continue_prompt = "reviewer_continue.md"
-        known_agent_types = ["worker"]  # 可以调用 worker
 
-提示词模板中用 {known_agents_section} 获取可调用 agent 的信息。
+hire 时通过 dep_names 传入关联的 agent：
+    kai hire myreviewer reviewer worker1 worker2
+
+提示词模板中用 {known_agents_section} 获取关联 agent 的信息。
 """
 from pathlib import Path
 from typing import List
@@ -25,38 +26,39 @@ from secretary.agent_config import (
 )
 
 
-def _build_known_agents_section(agent_name: str, known_types: list[str]) -> str:
+def _build_known_agents_section(agent_name: str) -> str:
     """
-    构建 known_agents 上下文：列出本 agent 可以调用的其他 agent。
+    构建 known_agents 上下文：列出本 agent 在 hire 时关联的其他 agent。
 
-    每个 known agent 包含：名字、类型、描述、tasks/ 路径（往这里写 .md 就是调用它）。
+    从 agents.json 的 known_agents 字段读取名称列表，
+    查询每个 agent 的类型、描述、tasks/ 路径和待处理数。
     """
-    if not known_types:
+    from secretary.agents import get_worker, _worker_tasks_dir
+
+    info = get_worker(agent_name)
+    if not info:
+        return ""
+    known_names = info.get("known_agents", [])
+    if not known_names:
         return ""
 
-    from secretary.agents import list_workers, _worker_tasks_dir
-
-    agents = list_workers()
-    lines = ["## 你可以调用的 Agent\n"]
-    lines.append("向对方的 tasks/ 目录写入 .md 任务文件即可调用。\n")
-    found = False
-    for a in agents:
-        if a.get("name") == agent_name:
+    lines = [
+        "## 你可以调用的 Agent\n",
+        "向对方的 tasks/ 目录写入 .md 任务文件即可调用。\n",
+    ]
+    for n in known_names:
+        peer = get_worker(n)
+        if not peer:
+            lines.append(f"- **{n}**: (未注册)\n")
             continue
-        if a.get("type") not in known_types:
-            continue
-        found = True
-        n = a["name"]
-        t = a.get("type", "?")
-        desc = a.get("description", "") or "通用"
+        t = peer.get("type", "?")
+        desc = peer.get("description", "") or "通用"
         tasks_dir = _worker_tasks_dir(n)
-        pending = a.get("pending_count", 0)
+        pending = peer.get("pending_count", 0)
         lines.append(
             f"- **{n}** ({t}): {desc}\n"
-            f"  任务目录: `{tasks_dir}` | 待处理: {pending}\n"
+            f"  调用方式: 写入 `{tasks_dir}/<任务名>.md` | 当前待处理: {pending}\n"
         )
-    if not found:
-        lines.append("(当前没有可调用的 agent)\n")
     return "\n".join(lines)
 
 
@@ -72,7 +74,10 @@ class AgentType:
 
     子类可选设置的属性:
         use_ongoing        — 是否使用 ongoing 目录（默认 False）
-        known_agent_types  — 可调用的 agent 类型列表（默认空 = 不调用其他 agent）
+
+    关联 agent（known_agents）:
+        hire 时通过 dep_names 传入，存储在 agents.json 中。
+        build_prompt() 自动注入 {known_agents_section}。
 
     子类可选覆盖的方法:
         build_prompt()     — 构建首轮提示词
@@ -88,7 +93,6 @@ class AgentType:
 
     # ---- 子类可选设置 ----
     use_ongoing: bool = False
-    known_agent_types: list[str] = []
 
     # ---- 提示词构建 ----
 
@@ -107,7 +111,7 @@ class AgentType:
         task_content = task_file.read_text(encoding="utf-8") if task_file.exists() else ""
         report_filename = task_file.name.replace(".md", "") + "-report.md"
         memory_file_path = _worker_memory_file(config.name)
-        known_section = _build_known_agents_section(config.name, self.known_agent_types)
+        known_section = _build_known_agents_section(config.name)
 
         return template.format(
             base_dir=cfg.BASE_DIR,

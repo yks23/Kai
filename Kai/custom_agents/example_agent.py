@@ -3,11 +3,12 @@
 
 只需几行属性即可定义一个新的 agent 类型。
 对应的提示词模板放在 Kai/custom_prompts/ 目录下。
-模板中用 {known_agents_section} 引用可调用的 agent 列表。
 
-用法:
-  kai hire myreviewer reviewer
-  kai task "审查 README.md" --agent myreviewer
+hire 时通过 dep_names 关联其他 agent：
+  kai hire myreviewer reviewer worker1 worker2
+  → myreviewer 的提示词自动包含 worker1/worker2 的信息和调用方式
+
+模板中用 {known_agents_section} 引用关联 agent 的列表。
 """
 from secretary.agent_types.base import AgentType
 
@@ -17,4 +18,3 @@ class ReviewerAgent(AgentType):
     icon = "🔍"
     first_prompt = "reviewer.md"
     continue_prompt = "reviewer_continue.md"
-    known_agent_types = ["worker"]  # reviewer 可以给 worker 派任务

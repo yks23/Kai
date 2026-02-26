@@ -587,9 +587,10 @@ def _create_boss(
         config_content += f"最大执行次数: {max_executions}\n"
     (boss_dir / "config.md").write_text(config_content, encoding="utf-8")
 
-    # 注册boss agent
+    # 注册boss agent（known_agents = 监控的 worker）
     if not existing_boss:
-        register_agent(boss_name, agent_type="boss", description=f"Boss: {goal[:50]}")
+        register_agent(boss_name, agent_type="boss", description=f"Boss: {goal[:50]}",
+                       known_agents=[worker_name])
 
     if start:
         _start_agent_scanner(boss_name, "boss", silent=False)
@@ -775,14 +776,24 @@ def cmd_hire(args):
             _start_agent_scanner(agent_name, existing_type, silent=False)
         return
 
+    # ---- 确保依赖 agent 存在（不存在则按 worker 创建）----
+    for dep in dep_names:
+        from secretary.agents import get_worker as _gw
+        if not _gw(dep):
+            register_agent(dep, agent_type="worker", description=f"由 {agent_name} 关联创建")
+            print(f"   ✅ 自动创建 worker: {dep}")
+
     # ---- 新建 agent ----
     if agent_type == "boss":
         monitored_worker = dep_names[0] if dep_names else cfg.DEFAULT_WORKER_NAME
         goal = description or "推进项目目标"
         _create_boss(agent_name, goal, monitored_worker, start=not no_start)
     else:
-        register_agent(agent_name, agent_type=agent_type, description=description)
+        register_agent(agent_name, agent_type=agent_type, description=description,
+                       known_agents=dep_names if dep_names else None)
         print(f"✅ 已注册 {agent_type} agent: {agent_name}")
+        if dep_names:
+            print(f"   📋 已关联: {', '.join(dep_names)}")
         if not no_start:
             print(t("msg_starting_agent").format(agent_name=agent_name, agent_type=agent_type))
             _start_agent_scanner(agent_name, agent_type, silent=False)

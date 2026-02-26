@@ -273,7 +273,6 @@ class RecyclerAgent(AgentType):
     icon = "♻️"
     first_prompt = "recycler.md"
     continue_prompt = "recycler_continue.md"
-    known_agent_types = ["secretary"]  # recycler 可将未解决任务重新提交给 secretary
 
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
         config = super().build_config(base_dir, agent_name)

@@ -228,7 +228,6 @@ class BossAgent(AgentType):
     icon = "👔"
     first_prompt = "boss.md"
     continue_prompt = "boss_continue.md"
-    known_agent_types = ["worker"]  # boss 向 worker 分配任务
 
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
         config = super().build_config(base_dir, agent_name)

@@ -95,38 +95,46 @@ from secretary.agent_paths import (
 #  CRUD
 # ============================================================
 
-def register_agent(agent_name: str, agent_type: str = "worker", description: str = "") -> dict:
+def register_agent(
+    agent_name: str,
+    agent_type: str = "worker",
+    description: str = "",
+    known_agents: list[str] | None = None,
+) -> dict:
     """
-    注册一个新 agent（统一接口，支持类型）。
-    创建专属目录 {name}/tasks 和 {name}/ongoing。
-    返回 agent 信息字典。
+    注册一个新 agent（统一接口）。
+    known_agents: hire 时传入的依赖 agent 名称列表，持久化到 agents.json。
     """
     reg = _load_registry()
 
     if agent_name in reg["workers"]:
-        # 已存在，更新信息（确保type和description被更新）
         updated = False
-        if description and reg["workers"][agent_name].get("description") != description:
-            reg["workers"][agent_name]["description"] = description
+        entry = reg["workers"][agent_name]
+        if description and entry.get("description") != description:
+            entry["description"] = description
             updated = True
-        if agent_type and reg["workers"][agent_name].get("type") != agent_type:
-            reg["workers"][agent_name]["type"] = agent_type
+        if agent_type and entry.get("type") != agent_type:
+            entry["type"] = agent_type
+            updated = True
+        if known_agents is not None and entry.get("known_agents") != known_agents:
+            entry["known_agents"] = known_agents
             updated = True
         if updated:
             _save_registry(reg)
-        return reg["workers"][agent_name]
+        return entry
 
     info = {
         "name": agent_name,
-        "type": agent_type,      # secretary / worker / boss / recycler
+        "type": agent_type,
         "description": description,
         "hired_at": datetime.now().isoformat(),
         "completed_tasks": 0,
-        "recent_tasks": [],      # 最近完成的任务名列表 (最多保留 20 条)
-        "specialties": [],       # 擅长方向 (由秘书历史推断)
-        "status": "idle",        # idle / busy / offline
-        "pid": None,             # 运行时填入 scanner 的 PID
-        "executing": False,      # 是否正在执行任务（process_fn 被触发）
+        "recent_tasks": [],
+        "specialties": [],
+        "known_agents": known_agents or [],
+        "status": "idle",
+        "pid": None,
+        "executing": False,
     }
     reg["workers"][agent_name] = info
     _save_registry(reg)

@@ -189,7 +189,6 @@ class SecretaryAgent(AgentType):
     icon = "🤖"
     first_prompt = "secretary.md"
     continue_prompt = "secretary_continue.md"
-    known_agent_types = ["worker"]  # secretary 向 worker 分配任务
 
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
         """读取任务 → 移动到 reports/ → 调用 run_secretary"""
