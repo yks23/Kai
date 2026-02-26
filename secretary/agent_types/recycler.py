@@ -268,12 +268,12 @@ def run_recycler(once: bool = False, verbose: bool = True, recycler_name: str = 
 # ============================================================
 
 class RecyclerAgent(AgentType):
-    """Recycler Agent 类型"""
-    
+    """Recycler Agent — 审查报告，可重新提交任务给 secretary"""
     name = "recycler"
     icon = "♻️"
     first_prompt = "recycler.md"
     continue_prompt = "recycler_continue.md"
+    known_agent_types = ["secretary"]  # recycler 可将未解决任务重新提交给 secretary
 
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
         config = super().build_config(base_dir, agent_name)

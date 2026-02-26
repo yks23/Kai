@@ -223,11 +223,12 @@ def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True) -> bool:
 
 
 class BossAgent(AgentType):
-    """Boss Agent — 覆盖 build_config 添加自定义触发逻辑"""
+    """Boss Agent — 监控 worker 并生成任务"""
     name = "boss"
     icon = "👔"
     first_prompt = "boss.md"
     continue_prompt = "boss_continue.md"
+    known_agent_types = ["worker"]  # boss 向 worker 分配任务
 
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
         config = super().build_config(base_dir, agent_name)

@@ -184,11 +184,12 @@ def run_secretary(user_request: str, verbose: bool = True, secretary_name: str =
 
 
 class SecretaryAgent(AgentType):
-    """Secretary Agent — 使用自定义 build_prompt 注入 worker 信息和目标"""
+    """Secretary Agent — 调用 worker 分配任务"""
     name = "secretary"
     icon = "🤖"
     first_prompt = "secretary.md"
     continue_prompt = "secretary_continue.md"
+    known_agent_types = ["worker"]  # secretary 向 worker 分配任务
 
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
         """读取任务 → 移动到 reports/ → 调用 run_secretary"""
