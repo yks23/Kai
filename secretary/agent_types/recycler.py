@@ -101,12 +101,16 @@ def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") ->
     reason_filename = f"{task_name}-unsolved-reason.md"
     from secretary.agents import _worker_memory_file
     memory_file_path = _worker_memory_file(recycler_name)
+    from secretary.agent_types.base import _build_known_agents_section
+    known_section = _build_known_agents_section(recycler_name)
+
     template = load_prompt("recycler.md")
     return template.format(
         base_dir=BASE_DIR,
         report_file=report_file,
         report_content=report_content,
         stats_section=stats_section,
+        known_agents_section=known_section,
         solved_dir=solved_dir,
         unsolved_dir=unsolved_dir,
         memory_file_path=memory_file_path_section,

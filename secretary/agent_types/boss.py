@@ -74,35 +74,31 @@ def _get_completed_tasks_summary(worker_name: str) -> str:
 # ---- 提示词 ----
 
 def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
+    from secretary.agent_types.base import _build_known_agents_section
+    from secretary.agents import _worker_memory_file
+
     goal = _load_boss_goal(boss_dir)
-    worker_name = _load_boss_worker_name(boss_dir)
-    if not worker_name:
-        return ""
+    boss_name = boss_dir.name
+    known_section = _build_known_agents_section(boss_name)
 
-    w_tasks = _worker_tasks_dir(worker_name)
-    w_reports = _worker_reports_dir(worker_name)
-
-    # 触发来源：是自己的任务文件还是 worker 的报告？
     trigger_info = ""
     if task_file.exists():
         trigger_content = task_file.read_text(encoding="utf-8").strip()
-        if "report" in task_file.parent.name or task_file.name.endswith("-report.md"):
-            trigger_info = f"\n## 触发来源：Worker 新报告\n\n以下是 Worker 提交的最新报告，请据此生成后续任务：\n\n---\n{trigger_content}\n---\n"
+        if task_file.name.endswith("-report.md"):
+            trigger_info = f"\n## 触发来源：Agent 新报告\n\n---\n{trigger_content}\n---\n"
         else:
             trigger_info = f"\n## 触发来源：新任务\n\n---\n{trigger_content}\n---\n"
 
-    from secretary.agents import _worker_memory_file
-    memory_file_path = _worker_memory_file(boss_dir.name)
+    worker_name = _load_boss_worker_name(boss_dir)
+    memory_file_path = _worker_memory_file(boss_name)
 
     template = load_prompt("boss.md")
     return template.format(
         base_dir=cfg.BASE_DIR,
         goal=goal,
-        worker_name=worker_name,
-        worker_tasks_dir=w_tasks,
-        worker_reports_dir=w_reports,
+        known_agents_section=known_section,
         boss_reports_dir=boss_dir / "reports",
-        completed_tasks_summary=_get_completed_tasks_summary(worker_name),
+        completed_tasks_summary=_get_completed_tasks_summary(worker_name) if worker_name else "",
         trigger_info=trigger_info,
         memory_file_path=f"`{memory_file_path}`" if memory_file_path else "",
     )

@@ -57,15 +57,6 @@ def _load_goals(secretary_name: str) -> str:
     return "\n".join(f"- {g}" for g in goals)
 
 
-def _load_workers_info() -> str:
-    """加载工人信息摘要 (供秘书 Agent 分配任务)"""
-    try:
-        from secretary.agents import build_workers_summary
-        return build_workers_summary()
-    except Exception:
-        return ""
-
-
 def _load_existing_tasks_summary() -> str:
     """扫描所有工人的任务目录，生成现有任务概览"""
     lines = []
@@ -117,24 +108,10 @@ def _append_memory(user_request: str, agent_output: str, secretary_name: str):
 
 def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
     """构建给秘书 Agent 的提示词"""
-    memory_file_path = str(cfg.AGENTS_DIR / secretary_name / "memory.md")
+    from secretary.agent_types.base import _build_known_agents_section
 
-    workers_info = _load_workers_info()
-    if workers_info:
-        workers_section = (
-            "\n## 已招募的工人及其工作总结\n"
-            "以下是当前已招募的工人及其详细信息，**你必须**根据这些信息决定把任务分配给谁。\n\n"
-            + workers_info + "\n"
-        )
-    else:
-        workers_section = (
-            "\n## ⚠️ 错误：没有可用的工人\n"
-            "**当前没有招募任何工人。**\n\n"
-            "**你必须拒绝处理这个任务**，并明确告诉用户：\n"
-            "- 需要先招募工人才能分配任务\n"
-            "- 使用 `kai hire` 或 `kai hire <名字>` 来招募工人\n\n"
-            "**不要创建任何任务文件，直接说明需要先招募工人。**\n"
-        )
+    memory_file_path = str(cfg.AGENTS_DIR / secretary_name / "memory.md")
+    known_section = _build_known_agents_section(secretary_name)
 
     tasks_overview = _load_existing_tasks_summary()
     tasks_section = "\n## 当前待处理任务概览\n" + tasks_overview + "\n" if tasks_overview else ""
@@ -145,9 +122,8 @@ def build_secretary_prompt(user_request: str, secretary_name: str) -> str:
     template = load_prompt("secretary.md")
     return template.format(
         base_dir=cfg.BASE_DIR,
-        tasks_dir=str(cfg.AGENTS_DIR / cfg.DEFAULT_WORKER_NAME / "tasks"),
         memory_file_path=memory_file_path,
-        workers_section=workers_section,
+        known_agents_section=known_section,
         tasks_section=tasks_section,
         goals_section=goals_section,
         user_request=user_request,

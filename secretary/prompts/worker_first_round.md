@@ -21,6 +21,7 @@
 {task_content}
 ---
 
+{known_agents_section}
 # 4. 执行任务
 
 根据任务内容：

@@ -23,7 +23,7 @@
 ---
 
 {stats_section}
-
+{known_agents_section}
 # 4. 执行任务
 
 ## 审查流程
