@@ -189,6 +189,32 @@ def register_agent(
     return info
 
 
+def add_known_agent(agent_name: str, peer_name: str) -> bool:
+    """给 agent_name 添加一个 known agent。返回是否成功。"""
+    reg = _load_registry()
+    if agent_name not in reg["workers"]:
+        return False
+    known = reg["workers"][agent_name].get("known_agents", [])
+    if peer_name not in known:
+        known.append(peer_name)
+        reg["workers"][agent_name]["known_agents"] = known
+        _save_registry(reg)
+    return True
+
+
+def remove_known_agent(agent_name: str, peer_name: str) -> bool:
+    """从 agent_name 移除一个 known agent。返回是否成功。"""
+    reg = _load_registry()
+    if agent_name not in reg["workers"]:
+        return False
+    known = reg["workers"][agent_name].get("known_agents", [])
+    if peer_name in known:
+        known.remove(peer_name)
+        reg["workers"][agent_name]["known_agents"] = known
+        _save_registry(reg)
+    return True
+
+
 def register_worker(worker_name: str, description: str = "") -> dict:
     """
     向后兼容：注册worker（默认类型为worker）

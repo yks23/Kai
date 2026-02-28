@@ -1302,6 +1302,54 @@ def cmd_clean_processes(args):
 
 
 # ============================================================
+#  link / unlink — 动态管理 known agents
+# ============================================================
+
+def cmd_link(args):
+    """动态添加 known agent 关联"""
+    from secretary.agents import add_known_agent, get_worker, register_agent
+
+    agent_name = args.agent_name
+    peer_names = args.peer_names
+
+    info = get_worker(agent_name)
+    if not info:
+        print(f"❌ Agent '{agent_name}' 不存在")
+        return
+
+    for peer in peer_names:
+        if not get_worker(peer):
+            register_agent(peer, agent_type="worker", description=f"由 {agent_name} 关联创建")
+            print(f"   ✅ 自动创建 worker: {peer}")
+        add_known_agent(agent_name, peer)
+        print(f"   🔗 {agent_name} → {peer}")
+
+    updated = get_worker(agent_name)
+    print(f"\n   📋 {agent_name} 的关联: {', '.join(updated.get('known_agents', []))}")
+
+
+def cmd_unlink(args):
+    """动态移除 known agent 关联"""
+    from secretary.agents import remove_known_agent, get_worker
+
+    agent_name = args.agent_name
+    peer_names = args.peer_names
+
+    info = get_worker(agent_name)
+    if not info:
+        print(f"❌ Agent '{agent_name}' 不存在")
+        return
+
+    for peer in peer_names:
+        remove_known_agent(agent_name, peer)
+        print(f"   ✂️  {agent_name} ✗ {peer}")
+
+    updated = get_worker(agent_name)
+    known = updated.get("known_agents", [])
+    print(f"\n   📋 {agent_name} 的关联: {', '.join(known) if known else '(无)'}")
+
+
+# ============================================================
 #  upgrade 命令 + 更新检查
 # ============================================================
 
@@ -2237,6 +2285,15 @@ Agent管理 (hire 统一入口):
     # ---- upgrade ----
     subparsers.add_parser("upgrade", help="🔄 从远端拉取最新代码并重新安装")
 
+    # ---- link / unlink ----
+    p = subparsers.add_parser("link", help="🔗 给 agent 添加关联（known agents）")
+    p.add_argument("agent_name", help="主 agent 名称")
+    p.add_argument("peer_names", nargs="+", help="要关联的 agent 名称")
+
+    p = subparsers.add_parser("unlink", help="✂️  移除 agent 关联")
+    p.add_argument("agent_name", help="主 agent 名称")
+    p.add_argument("peer_names", nargs="+", help="要移除关联的 agent 名称")
+
     handlers = {
         "task": cmd_task,
         "boss": cmd_boss,
@@ -2253,6 +2310,8 @@ Agent管理 (hire 统一入口):
         "clean-logs": cmd_clean_logs,
         "clean-processes": cmd_clean_processes,
         "upgrade": cmd_upgrade,
+        "link": cmd_link,
+        "unlink": cmd_unlink,
         "base": cmd_base,
         "name": cmd_name,
         "model": cmd_model,
