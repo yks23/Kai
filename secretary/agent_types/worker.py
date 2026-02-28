@@ -25,17 +25,20 @@ def _try_parse_workspace(task_file: Path) -> str:
 
 def build_first_round_prompt(task_file: Path, report_dir: Path | None = None, agent_name: str | None = None) -> str:
     from secretary.agents import _worker_reports_dir, _worker_memory_file
+    from secretary.agent_types.base import _build_known_agents_section
     task_content = task_file.read_text(encoding="utf-8")
     report_filename = task_file.name.replace(".md", "") + "-report.md"
     if report_dir is None and agent_name:
         report_dir = _worker_reports_dir(agent_name)
     effective_report_dir = report_dir or (BASE_DIR / "agents" / "unknown" / "reports")
     memory_file_path = _worker_memory_file(agent_name) if agent_name else ""
+    known_section = _build_known_agents_section(agent_name) if agent_name else ""
     template = load_prompt("worker_first_round.md")
     return template.format(
         base_dir=BASE_DIR, task_file=task_file, task_content=task_content,
         report_dir=effective_report_dir, report_filename=report_filename,
         memory_file_path=memory_file_path,
+        known_agents_section=known_section,
     )
 
 
