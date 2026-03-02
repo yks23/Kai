@@ -28,27 +28,23 @@ WORKSPACE: Optional[Path] = None
 def _resolve_workspace() -> Path:
     """
     按优先级确定 WORKSPACE:
-      env var > 持久化配置 > CWD
+      env var > CWD
     (CLI --workspace 在 cli.py 中覆盖，优先级最高)
+
+    注意：持久化的 kai base 设置不再影响启动路径，避免移动项目目录后
+    使用旧路径导致 scanner 监视错误目录。若需固定工作区请设置
+    SECRETARY_WORKSPACE 环境变量。
     """
     # 优先: 环境变量
     env_ws = os.environ.get("SECRETARY_WORKSPACE", "").strip()
     if env_ws:
         return Path(env_ws).resolve()
 
-    # 其次: 持久化配置 (kai base <path>)
-    try:
-        from secretary.settings import get_base_dir
-        saved = get_base_dir()
-        if saved:
-            return Path(saved).resolve()
-    except Exception:
-        pass
-
-    # 兜底: CWD
+    # 始终使用 CWD（CLI 启动后 main() 会再次 apply_workspace(CWD) 确认）
     return Path.cwd().resolve()
 
 
+# 初始化时使用默认值，CLI 启动时会自动应用当前工作目录
 WORKSPACE = _resolve_workspace()
 
 # BASE_DIR 统一为 WORKSPACE/Kai

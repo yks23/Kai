@@ -72,11 +72,6 @@ class AgentPaths:
         return self.base_dir / "stats"
     
     @property
-    def memory_file(self) -> Path:
-        """memory.md 文件"""
-        return self.base_dir / "memory.md"
-    
-    @property
     def goals_file(self) -> Path:
         """goals.md 文件"""
         return self.base_dir / "goals.md"
@@ -131,7 +126,4 @@ def _worker_reports_dir(worker_name: str) -> Path:
     return AgentPaths(worker_name).output_dir
 
 
-def _worker_memory_file(worker_name: str) -> Path:
-    """获取 worker 的 memory.md 文件路径"""
-    return AgentPaths(worker_name).memory_file
 

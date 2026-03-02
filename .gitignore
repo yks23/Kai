@@ -9,5 +9,6 @@ unsolved-report/
 workers/
 *.json
 secretary_memory.md
-agents/
-secretary/_pycache_/
+/agents/
+_pycache_/
+/Kai/

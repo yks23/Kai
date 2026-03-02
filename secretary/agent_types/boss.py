@@ -16,7 +16,6 @@ from typing import List
 
 import secretary.config as cfg
 from secretary.agent_loop import load_prompt
-from secretary.agent_runner import run_agent
 from secretary.agents import _worker_tasks_dir, _worker_ongoing_dir, _worker_reports_dir
 from secretary.agent_config import (
     AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig
@@ -127,6 +126,15 @@ def _get_completed_tasks_summary(worker_name: str) -> str:
     return "\n".join(lines)
 
 
+def build_boss_continue_prompt(boss_dir: Path) -> str:
+    """构建 Boss 续轮提示词 — 已有会话时使用简短指令"""
+    goal = _load_boss_goal(boss_dir)
+    worker_name = _load_boss_worker_name(boss_dir)
+    w_tasks = _worker_tasks_dir(worker_name) if worker_name else cfg.BASE_DIR
+    template = load_prompt("boss_continue.md")
+    return template.format(goal=goal, worker_tasks_dir=w_tasks)
+
+
 def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
     """构建 Boss Agent 的提示词"""
     goal = _load_boss_goal(boss_dir)
@@ -146,10 +154,8 @@ def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
             reports_info += "\n".join(f"- {r.name}" for r in rfiles) + "\n"
 
     boss_name = boss_dir.name
-    from secretary.agents import _worker_memory_file
-    memory_file_path = _worker_memory_file(boss_name)
-
-    template = load_prompt("boss.md")
+    from secretary.agents import build_known_agents_section
+    template = load_prompt("boss_first.md")
     return template.format(
         base_dir=cfg.BASE_DIR,
         goal=goal,
@@ -160,18 +166,22 @@ def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
         boss_reports_dir=boss_dir / "reports",
         completed_tasks_summary=_get_completed_tasks_summary(worker_name),
         reports_info=reports_info,
-        memory_file_path=f"`{memory_file_path}`" if memory_file_path else "",
+        known_agents_section=build_known_agents_section(boss_name),
     )
 
 
-def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True) -> bool:
+def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True,
+             dialog_file=None) -> bool:
     """运行 Boss Agent 处理任务。返回是否成功。"""
+    from secretary.agent_types.base import run_agent_with_session
+
     worker_name = _load_boss_worker_name(boss_dir)
     if not worker_name:
         if verbose:
             print("❌ Boss 配置不完整：缺少 worker 名称")
         return False
-    worker_tasks_dir = _worker_tasks_dir(worker_name)
+
+    worker_tasks_dir   = _worker_tasks_dir(worker_name)
     worker_ongoing_dir = _worker_ongoing_dir(worker_name)
     pending_count = len(list(worker_tasks_dir.glob("*.md"))) if worker_tasks_dir.exists() else 0
     ongoing_count = len(list(worker_ongoing_dir.glob("*.md"))) if worker_ongoing_dir.exists() else 0
@@ -179,24 +189,25 @@ def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True) -> bool:
         if verbose:
             print(f"ℹ️ Worker '{worker_name}' 队列不为空，无需生成新任务")
         return True
+
+    boss_name = boss_dir.name
     if verbose:
         goal = _load_boss_goal(boss_dir)
-        print(f"📋 Boss Agent 收到任务: 为 worker '{worker_name}' 生成新任务")
-        if goal:
-            print(f"   持续目标: {goal[:100]}...")
-    prompt = build_boss_prompt(task_file, boss_dir)
-    if not prompt:
+        print(f"\n[{boss_name}] ▶ 为 worker '{worker_name}' 生成新任务"
+              + (f" | 目标: {goal[:80]}…" if goal else ""))
+
+    first = build_boss_prompt(task_file, boss_dir)
+    if not first:
         if verbose:
             print("❌ 无法构建 Boss 提示词：配置不完整")
         return False
-    from secretary.settings import get_model
-    result = run_agent(
-        prompt=prompt,
-        workspace=str(cfg.get_workspace()),
-        model=get_model(),
-        verbose=verbose,
+    cont = build_boss_continue_prompt(boss_dir)
+
+    result = run_agent_with_session(
+        boss_name, first, cont,
+        dialog_file=dialog_file, verbose=verbose,
     )
-    
+
     # 写入 stats 文件以便统计执行次数
     from datetime import datetime
     stats_dir = boss_dir / "stats"
@@ -212,7 +223,7 @@ def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True) -> bool:
         "worker_name": worker_name,
     }
     stats_file.write_text(json.dumps(stats_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    
+
     if result.success:
         if verbose:
             print(f"\n✅ Boss Agent 完成 (耗时 {result.duration:.1f}s)")
@@ -239,7 +250,7 @@ class BossAgent(AgentType):
     
     @property
     def prompt_template(self) -> str:
-        return "boss.md"
+        return "boss_first.md"
     
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
         """
@@ -302,6 +313,7 @@ class BossAgent(AgentType):
             output_dir=boss_dir / "reports",  # Boss 自己的报告目录
             logs_dir=boss_dir / "logs",
             stats_dir=boss_dir / "stats",
+            dialog_dir=boss_dir / "dialog",
             trigger=TriggerConfig(
                 watch_dirs=[],  # Boss不使用标准目录监视，使用自定义函数
                 condition=TriggerCondition.HAS_FILES,
@@ -309,21 +321,16 @@ class BossAgent(AgentType):
                 custom_trigger_fn=boss_trigger_fn,
             ),
             termination=TerminationCondition.UNTIL_FILE_DELETED,  # Boss持续运行，处理完任务后继续循环
-            first_round_prompt="boss.md",
+            first_round_prompt="boss_first.md",
+            continue_prompt="boss_continue.md",
             use_ongoing=False,  # Boss不需要ongoing目录
             log_file=boss_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),
         )
     
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
-        """
-        处理 Boss 任务
-        
-        流程：
-        1. 检查是否是触发标记（.boss_trigger_marker）
-        2. 直接调用 run_boss 处理（不需要实际文件，只检查目录是否为空）
-        """
-        # Boss使用触发标记，直接处理，不需要文件存在
-        # task_file 只是标记，实际处理时重新检查目录状态
-        run_boss(task_file, config.base_dir, verbose=verbose)
+        """处理 Boss 任务（task_file 为触发标记，实际处理时重新检查目录状态）"""
+        from secretary.agent_types.base import prepare_dialog_file
+        dialog_file = prepare_dialog_file(config, task_file.stem)
+        run_boss(task_file, config.base_dir, verbose=verbose, dialog_file=dialog_file)
 

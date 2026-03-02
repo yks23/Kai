@@ -15,7 +15,6 @@ from typing import List
 import secretary.config as cfg
 from secretary.config import BASE_DIR, AGENTS_DIR, RECYCLER_INTERVAL
 from secretary.agent_loop import load_prompt, run_loop
-from secretary.agent_runner import run_agent
 from secretary.agent_config import (
     AgentConfig, TerminationCondition, TriggerCondition, TriggerConfig
 )
@@ -72,46 +71,31 @@ def _get_recycler_dirs(recycler_name: str = "recycler") -> tuple[Path, Path]:
     return solved_dir, unsolved_dir
 
 
+def build_recycler_continue_prompt(report_file: Path) -> str:
+    """构建回收者续轮提示词 — 已有会话时使用简短指令"""
+    template = load_prompt("recycler_continue.md")
+    return template.format(report_file=report_file)
+
+
 def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") -> str:
-    """构建回收者 Agent 的提示词"""
-    report_content = report_file.read_text(encoding="utf-8")
+    """构建回收者 Agent 的首轮提示词（完整角色定义 + 工作流）。agent 自行读取报告文件。"""
     task_name = report_file.stem.replace("-report", "")
     recycler_dir = AGENTS_DIR / recycler_name
     recycler_reports_dir = recycler_dir / "reports"
-    stats_dir = None
-    parts = report_file.parts
-    if "agents" in parts and "reports" in parts:
-        try:
-            agents_idx = parts.index("agents")
-            if agents_idx + 1 < len(parts):
-                agent_name = parts[agents_idx + 1]
-                stats_dir = AGENTS_DIR / agent_name / "stats"
-        except (ValueError, IndexError):
-            pass
-    if stats_dir is None:
-        stats_dir = AGENTS_DIR / recycler_name / "stats"
-    stats_md = stats_dir / f"{task_name}-stats.md"
-    stats_json = stats_dir / f"{task_name}-stats.json"
-    stats_section = ""
-    if stats_md.exists():
-        stats_section = "## 执行统计数据\n\n---\n" + stats_md.read_text(encoding="utf-8") + "\n---\n"
-    else:
-        stats_section = "(无统计数据；此任务在统计功能上线前完成)\n"
     solved_dir, unsolved_dir = _get_recycler_dirs(recycler_name)
     reason_filename = f"{task_name}-unsolved-reason.md"
-    from secretary.agents import _worker_memory_file
-    memory_file_path = _worker_memory_file(recycler_name)
-    template = load_prompt("recycler.md")
+    report_filename = f"{task_name}-recycler-report.md"
+    from secretary.agents import build_known_agents_section
+    template = load_prompt("recycler_first.md")
     return template.format(
         base_dir=BASE_DIR,
         report_file=report_file,
-        report_content=report_content,
-        stats_section=stats_section,
         solved_dir=solved_dir,
         unsolved_dir=unsolved_dir,
-        memory_file_path=memory_file_path_section,
         reason_filename=reason_filename,
+        report_filename=report_filename,
         recycler_reports_dir=recycler_reports_dir,
+        known_agents_section=build_known_agents_section(recycler_name),
     )
 
 
@@ -206,15 +190,24 @@ def _fallback_judgment(report_file: Path, agent_output: str, task_name: str,
     return False
 
 
-def process_report(report_file: Path, recycler_config: AgentConfig | None = None, verbose: bool = True) -> bool:
-    """对一份报告调用回收者 Agent 进行审查。返回 True=已处理，False=处理失败"""
+def process_report(report_file: Path, recycler_config: AgentConfig | None = None,
+                   verbose: bool = True, dialog_file=None) -> bool:
+    """对一份报告调用回收者 Agent 进行审查。返回 True=已处理，False=处理失败。agent 自行读取报告。"""
+    from secretary.agent_types.base import run_agent_with_session
+
     task_name = report_file.stem.replace("-report", "")
     recycler_name = recycler_config.name if recycler_config else "recycler"
-    report_content = report_file.read_text(encoding="utf-8") if report_file.exists() else ""
+
     if verbose:
-        print(f"\n🔍 回收者审查: {report_file.name}")
-    prompt = build_recycler_prompt(report_file, recycler_name=recycler_name)
-    result = run_agent(prompt=prompt, workspace=str(cfg.get_workspace()), verbose=verbose)
+        print(f"\n[回收者 {recycler_name}] ▶ {report_file.name}")
+
+    first  = build_recycler_prompt(report_file, recycler_name=recycler_name)
+    cont   = build_recycler_continue_prompt(report_file)
+    result = run_agent_with_session(
+        recycler_name, first, cont,
+        dialog_file=dialog_file, verbose=verbose,
+    )
+
     if not result.success:
         print(f"   ❌ 回收者 Agent 调用失败: {result.output[:200]}")
         return False
@@ -232,12 +225,16 @@ def process_report(report_file: Path, recycler_config: AgentConfig | None = None
         _ensure_unsolved_reason_record(task_name, unsolved_dir=unsolved_dir)
         if verbose:
             print(f"   ✅ 判定: 未完成 → {unsolved_dir.name}/")
+        # Read the report for resubmission context
+        report_content = report_file.read_text(encoding="utf-8") if report_file.exists() else ""
         _resubmit_task(task_name, report_content=report_content, verbose=verbose)
         return True
     if report_gone:
         if verbose:
             print("   ⚠️ 报告已被移动（Agent 已处理）")
         return True
+    # Fallback: read content only if needed
+    report_content = report_file.read_text(encoding="utf-8") if report_file.exists() else ""
     return _fallback_judgment(report_file, result.output, task_name, report_content, verbose, recycler_name)
 
 
@@ -280,7 +277,7 @@ class RecyclerAgent(AgentType):
     
     @property
     def prompt_template(self) -> str:
-        return "recycler.md"
+        return "recycler_first.md"
     
     def build_config(self, base_dir: Path, agent_name: str) -> AgentConfig:
         """
@@ -302,26 +299,24 @@ class RecyclerAgent(AgentType):
             output_dir=recycler_dir / "reports",
             logs_dir=recycler_dir / "logs",
             stats_dir=recycler_dir / "stats",
+            dialog_dir=recycler_dir / "dialog",
             trigger=TriggerConfig(
                 watch_dirs=[],  # Recycler不使用标准目录监视，使用自定义函数扫描所有reports
                 condition=TriggerCondition.HAS_FILES,
                 custom_trigger_fn=recycler_trigger_fn,
             ),
             termination=TerminationCondition.UNTIL_FILE_DELETED,  # Recycler持续运行，处理完报告后继续循环
-            first_round_prompt="recycler.md",
+            first_round_prompt="recycler_first.md",
+            continue_prompt="recycler_continue.md",
             use_ongoing=False,  # Recycler不需要ongoing目录
             log_file=recycler_dir / "logs" / "scanner.log",
             label=self.label_template.format(name=agent_name),
         )
     
     def process_task(self, config: AgentConfig, task_file: Path, verbose: bool = True) -> None:
-        """
-        处理 Recycler 任务
-        
-        流程：
-        1. task_file 实际上是报告文件路径
-        2. 调用 process_report 审查报告
-        """
-        # Recycler 的 task_file 实际上是报告文件
-        process_report(task_file, recycler_config=config, verbose=verbose)
+        """处理 Recycler 任务（task_file 实际上是报告文件路径）"""
+        from secretary.agent_types.base import prepare_dialog_file
+        # Recycler 按报告文件名分隔 dialog 条目
+        dialog_file = prepare_dialog_file(config, task_file.stem)
+        process_report(task_file, recycler_config=config, verbose=verbose, dialog_file=dialog_file)
 

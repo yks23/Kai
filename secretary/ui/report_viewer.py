@@ -8,12 +8,8 @@
   - 按 'n' 查看下一个任务
   - 按 'q' 退出
 """
-import time
 import threading
-import sys
-from pathlib import Path
 from datetime import datetime
-from typing import Optional
 
 # 使用公共的键盘输入处理
 from secretary.ui.common import setup_keyboard_input, restore_keyboard_input, read_key
@@ -24,7 +20,6 @@ from rich.panel import Panel
 from rich.layout import Layout
 from rich.text import Text
 from rich.markdown import Markdown
-from rich import box
 
 import secretary.config as cfg
 from secretary.agents import _worker_tasks_dir, _worker_ongoing_dir, get_worker

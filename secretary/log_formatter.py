@@ -4,8 +4,6 @@
 用于美化 scanner.log 中的输出，将原始的 stream-json 格式转换为易读的对话形式。
 """
 import json
-import re
-from typing import Optional
 
 
 def format_stream_json_to_conversation(raw_json: str) -> str:

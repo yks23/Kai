@@ -47,7 +47,7 @@ class AgentTypeRegistry:
         try:
             instance = agent_class()
             cls.register(type_name, instance)
-        except Exception as e:
+        except Exception:
             # 如果实例化失败，至少保存类，后续可以重试
             pass
     

@@ -155,6 +155,7 @@ def run_agent(
     verbose: bool = True,
     continue_session: bool = False,
     session_id: str = "",
+    dialog_file=None,  # Path | None — 对话内容写入此文件，不写入 stdout/scanner.log
 ) -> AgentResult:
     """
     调用 Agent，使用 stream-json 获取结构化统计数据
@@ -231,13 +232,30 @@ def run_agent(
     start = time.time()
     stats = RoundStats()
 
+    if session_id:
+        mode = f"续轮 {session_id[:8]}…"
+    elif continue_session:
+        mode = "续轮"
+    else:
+        mode = "首轮"
+
+    # 将发出的提示词写入 dialog 文件（对话的"用户"侧）
+    if dialog_file is not None:
+        try:
+            from pathlib import Path as _Path
+            from datetime import datetime as _dt
+            df = _Path(dialog_file)
+            df.parent.mkdir(parents=True, exist_ok=True)
+            ts = _dt.now().strftime("%H:%M:%S")
+            with open(df, "a", encoding="utf-8") as _f:
+                _f.write(f"\n{'─'*60}\n[{ts}] 提示词 ({mode})\n{'─'*60}\n")
+                _f.write(prompt)
+                _f.write("\n")
+                _f.flush()
+        except Exception:
+            pass
+
     if verbose:
-        if session_id:
-            mode = f"续轮 --resume {session_id[:8]}..."
-        elif continue_session:
-            mode = "续轮 --continue"
-        else:
-            mode = "首轮"
         print(f"  🤖 调用 Agent ({mode}) ...")
         # 打印完整命令（包括参数）
         cmd_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in cmd)
@@ -318,16 +336,33 @@ def run_agent(
         if stats.duration_ms == 0:
             stats.duration_ms = int(dur * 1000)
 
-        # 格式化并输出JSON内容（美化输出）
-        if verbose and json_lines:
+        # 格式化对话内容：写入 dialog 文件（如有），否则打印到 stdout
+        if json_lines:
             from secretary.log_formatter import format_stream_json_to_conversation
+            from datetime import datetime
             json_content = "\n".join(json_lines)
             formatted = format_stream_json_to_conversation(json_content)
             if formatted:
-                # 输出格式化的对话内容
-                print()  # 空行分隔
-                print(formatted)
-                print()  # 空行分隔
+                if dialog_file is not None:
+                    # 写入对话文件，不输出到 scanner.log
+                    try:
+                        from pathlib import Path as _Path
+                        df = _Path(dialog_file)
+                        df.parent.mkdir(parents=True, exist_ok=True)
+                        ts = datetime.now().strftime("%H:%M:%S")
+                        mode_label = f"续轮 {session_id[:8]}…" if session_id else ("续轮" if continue_session else "首轮")
+                        with open(df, "a", encoding="utf-8") as _f:
+                            _f.write(f"\n{'─'*60}\n[{ts}] {mode_label}\n{'─'*60}\n")
+                            _f.write(formatted)
+                            _f.write("\n")
+                            _f.flush()
+                    except Exception:
+                        pass
+                elif verbose:
+                    # 无 dialog 文件时回退到 stdout（向后兼容）
+                    print()
+                    print(formatted)
+                    print()
 
         full_output = "\n".join(output_lines)
         raw_full = "".join(raw_lines)  # 保留原始 stream-json 完整输出

@@ -8,7 +8,6 @@
   - `kai forget <skill-name>` 忘掉一个技能
   - `kai skills` 列出所有技能
 """
-import shutil
 from pathlib import Path
 
 import secretary.config as cfg

@@ -26,8 +26,7 @@ from datetime import datetime
 
 import secretary.config as cfg
 from secretary.settings import (
-    get_cli_name, set_cli_name, get_base_dir, set_base_dir,
-    get_model, set_model, get_language, load_settings,
+    get_cli_name, set_cli_name, get_base_dir, get_model, set_model,
 )
 from secretary.i18n import t
 
@@ -112,7 +111,6 @@ def _get_active_processes() -> list[dict]:
 def _remove_process(agent_name: str | None = None, pid: int | None = None):
     """从队列中移除进程（通过name或pid）"""
     # deque不支持切片赋值，需要重建deque
-    from collections import deque
     if agent_name:
         filtered = [p for p in _active_processes if p.get("name") != agent_name]
         _active_processes.clear()
@@ -236,6 +234,8 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
+        # 显式传入 WORKSPACE，防止子进程用 cwd（BASE_DIR）推导出错误的路径
+        env["SECRETARY_WORKSPACE"] = str(cfg.WORKSPACE)
         
         # 从注册表获取 agent 类型
         agent_type_instance = get_agent_type(agent_type)
@@ -248,7 +248,7 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
                 if available_types:
                     print(f"   可用类型: {', '.join(available_types)}")
                 else:
-                    print(f"   未找到任何已注册的 agent 类型")
+                    print("   未找到任何已注册的 agent 类型")
             return False
         
         # 准备日志目录
@@ -409,14 +409,13 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
     # 如果指定了 worker，直接写入该 worker 的 tasks 目录；否则交给下面写 secretary tasks
     if worker_name:
         from secretary.agents import get_worker, register_worker, _worker_tasks_dir
-        import secretary.config as cfg
         
         # 确保 worker 存在
         worker = get_worker(worker_name)
         worker_created = False
         if not worker:
             print(f"ℹ️  Worker '{worker_name}' 不存在，自动创建...")
-            register_worker(worker_name, description=f"由任务分配创建")
+            register_worker(worker_name, description="由任务分配创建")
             worker = get_worker(worker_name)
             worker_created = True
         
@@ -705,7 +704,7 @@ def cmd_skills(args):
     name = _cli_name()
 
     if not skills:
-        print(f"\n📚 还没有学会任何技能")
+        print("\n📚 还没有学会任何技能")
         print(f"   用 `{name} learn \"任务描述\" skill-name` 来教我！")
         return
 
@@ -715,7 +714,7 @@ def cmd_skills(args):
         desc = s["description"] or "(无描述)"
         print(f"   {tag} {s['name']:20s}  {desc}")
 
-    print(f"\n   📦 = 内置技能   🎓 = 已学技能")
+    print("\n   📦 = 内置技能   🎓 = 已学技能")
     print(f"   使用: {name} <技能名>")
     print(f"   学习: {name} learn \"描述\" <名字>")
     print(f"   忘记: {name} forget <名字>")
@@ -895,7 +894,7 @@ def cmd_fire(args):
 
         if info.get("ongoing_count", 0) > 0:
             print(f"⚠️  {worker_name} 还有 {info['ongoing_count']} 个任务在执行中!")
-            print(f"   将强制停止进程并解雇")
+            print("   将强制停止进程并解雇")
 
         # 1. 先停止进程（如果存在）
         pid = info.get("pid")
@@ -913,7 +912,7 @@ def cmd_fire(args):
         success = remove_worker(worker_name)
         if success:
             print(f"🔥 已解雇agent: {worker_name}")
-            print(f"   已停止进程、删除目录及注册信息")
+            print("   已停止进程、删除目录及注册信息")
         else:
             print(f"❌ 解雇失败: {worker_name}")
 
@@ -933,7 +932,7 @@ def cmd_recycle(args):
 
     # --once：前台执行一次后退出，不 spawn 后台进程
     if args.once:
-        print(f"\n♻️ 回收者（单次执行）\n")
+        print("\n♻️ 回收者（单次执行）\n")
         run_recycler(once=True, verbose=True)
         return
 
@@ -1125,20 +1124,246 @@ def _cleanup_all_processes():
     
     if stopped_count > 0 or updated_count > 0:
         print(f"   ✅ 已停止 {stopped_count} 个进程，更新 {updated_count} 个agent状态为idle")
-        print(f"   📁 Agent配置和文件夹已保留，下次启动时会自动恢复")
+        print("   📁 Agent配置和文件夹已保留，下次启动时会自动恢复")
     else:
-        print(f"   ℹ️  没有需要停止的进程")
+        print("   ℹ️  没有需要停止的进程")
+
+
+def _render_dialog_colored(content: str, _console=None):
+    """
+    解析 dialog.md 并以带颜色的对话格式打印到终端（使用 rich）。
+
+    格式约定（agent_runner.py 写入的）：
+      ============================================================  <- 任务分隔头
+      ## task-name
+      时间: ...
+      ============================================================
+
+      ------------------------------------------------------------  <- 消息块分隔
+      [HH:MM:SS] 提示词 (首轮/续轮)
+      ------------------------------------------------------------
+      <prompt 内容>
+
+      ------------------------------------------------------------
+      [HH:MM:SS] 首轮 / 续轮 / 用户
+      ------------------------------------------------------------
+      <agent 回复内容>
+
+    _console: 如果传入 rich Console 对象（如 pager console），则直接使用它；
+              否则自动创建一个 UTF-8 stdout 包装的 Console。
+    """
+    import re
+    import sys
+    import io
+    _utf8_stdout = None
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.text import Text
+        from rich.rule import Rule
+        if _console is not None:
+            _con = _console
+        else:
+            # Force UTF-8 output so emoji in dialog content render correctly on Windows
+            # NOTE: we must call _utf8_stdout.detach() before returning so the wrapper
+            # doesn't close sys.stdout.buffer when it goes out of scope.
+            _utf8_stdout = io.TextIOWrapper(
+                sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+            )
+            _con = Console(highlight=False, file=_utf8_stdout, force_terminal=True)
+    except ImportError:
+        # fallback: plain text
+        _con = None
+
+    def _rprint(s, style=""):
+        if _con:
+            _con.print(s, style=style)
+        else:
+            print(s)
+
+    def _rule(title="", style="dim"):
+        if _con:
+            _con.print(Rule(title, style=style))
+        else:
+            print(f"── {title} " + "─" * max(0, 56 - len(title)))
+
+    DASH60 = "\u2500" * 60  # ─
+    EQ60   = "=" * 60
+
+    lines = content.splitlines()
+    i = 0
+    total = len(lines)
+
+    def _print_task_header(block_lines):
+        title = ""
+        ts = ""
+        for ln in block_lines:
+            ln = ln.strip()
+            if ln.startswith("## "):
+                title = ln[3:].strip()
+            elif ln.startswith("\u65f6\u95f4:"):  # 时间:
+                ts = ln[3:].strip()
+        label = f"  Task: {title}" if title else "  Task"
+        ts_suffix = f"  {ts}" if ts else ""
+        if _con:
+            _con.print()
+            _con.rule(f"[bold yellow]{label}[/bold yellow][dim]{ts_suffix}[/dim]",
+                      style="yellow dim")
+        else:
+            print(f"\n{'=' * 60}")
+            print(f"{label}{ts_suffix}")
+            print("=" * 60)
+
+    def _print_message(header: str, body_lines: list):
+        m = re.search(r"\[(\d{2}:\d{2}:\d{2})\]", header)
+        ts = m.group(1) if m else ""
+
+        is_prompt = "\u63d0\u793a\u8bcd" in header   # 提示词
+        is_user   = "\u7528\u6237" in header           # 用户
+        is_first  = "\u9996\u8f6e" in header           # 首轮
+        is_resume = "\u7eed\u8f6e" in header           # 续轮
+
+        body = "\n".join(body_lines).strip()
+        MAX_BODY = 3000
+        truncated = len(body) > MAX_BODY
+        display_body = body[:MAX_BODY] if truncated else body
+
+        if is_prompt:
+            if is_first:
+                title_str = f"[bold cyan]>> 发送 [首轮提示词][/bold cyan]  [dim]{ts}[/dim]"
+                border_style = "cyan"
+            else:
+                title_str = f"[bold magenta]>> 发送 [续轮提示词][/bold magenta]  [dim]{ts}[/dim]"
+                border_style = "magenta"
+            body_style = "dim"
+        elif is_user:
+            title_str = f"[bold cyan]>> 用户[/bold cyan]  [dim]{ts}[/dim]"
+            border_style = "cyan"
+            body_style = ""
+        elif is_first or is_resume:
+            rnd = "首轮" if is_first else f"续轮"
+            title_str = f"[bold green]<< Agent [{rnd}][/bold green]  [dim]{ts}[/dim]"
+            border_style = "green"
+            body_style = ""
+        else:
+            title_str = f"[bold white]{header.strip()}[/bold white]  [dim]{ts}[/dim]"
+            border_style = "white"
+            body_style = ""
+
+        if _con:
+            _con.print()
+            if display_body:
+                _con.print(Panel(
+                    Text(display_body, style=body_style, no_wrap=False),
+                    title=title_str,
+                    border_style=border_style,
+                    padding=(0, 1),
+                ))
+                if truncated:
+                    _con.print(f"[dim]  ... (省略 {len(body) - MAX_BODY} 字符)[/dim]")
+            else:
+                _con.print(f"[{border_style}]{title_str}[/{border_style}]  [dim](empty)[/dim]")
+        else:
+            # plain fallback
+            print(f"\n--- {header.strip()} {ts} ---")
+            print(display_body)
+            if truncated:
+                print(f"  ... (省略 {len(body) - MAX_BODY} 字符)")
+
+    # ── 解析循环 ──
+    current_msg_header = ""
+    current_msg_body: list = []
+    in_msg_body = False
+
+    def _flush_msg():
+        nonlocal current_msg_header, current_msg_body, in_msg_body
+        if current_msg_header:
+            _print_message(current_msg_header, current_msg_body)
+        current_msg_header = ""
+        current_msg_body = []
+        in_msg_body = False
+
+    while i < total:
+        line = lines[i]
+        stripped = line.strip()
+
+        # 任务分隔头 ====
+        if stripped == EQ60:
+            _flush_msg()
+            j = i + 1
+            task_block = []
+            while j < total and lines[j].strip() != EQ60:
+                task_block.append(lines[j])
+                j += 1
+            if j < total:
+                _print_task_header(task_block)
+                i = j + 1
+            else:
+                i = j
+            continue
+
+        # 消息分隔线 ────  (三连格式: ─...─ / header / ─...─)
+        if stripped == DASH60:
+            if i + 2 < total:
+                header_line = lines[i + 1].strip()
+                next2 = lines[i + 2].strip()
+                if next2 == DASH60:
+                    _flush_msg()
+                    current_msg_header = header_line
+                    current_msg_body = []
+                    in_msg_body = True
+                    i += 3
+                    continue
+            i += 1
+            continue
+
+        if in_msg_body:
+            current_msg_body.append(line)
+
+        i += 1
+
+    _flush_msg()
+
+    # Release the buffer without closing it so sys.stdout stays usable
+    # (e.g. for the interactive loop's input() prompt after this returns).
+    if _utf8_stdout is not None:
+        try:
+            _utf8_stdout.detach()
+        except Exception:
+            pass
+
+
+def _tail_file_colored(path, render_fn, stop_event, interval=0.3):
+    """实时跟踪文件新增内容，用 render_fn 渲染每行"""
+    import time
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            f.seek(0, 2)  # 跳到末尾
+            buf = ""
+            while not stop_event.is_set():
+                chunk = f.read(4096)
+                if chunk:
+                    buf += chunk
+                    # 按换行刷新
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        render_fn(line)
+                else:
+                    time.sleep(interval)
+    except Exception:
+        pass
 
 
 def cmd_check(args):
-    """查看 agent 日志。默认进入翻页浏览器（q 退出），-f 实时跟踪。"""
+    """查看 agent 日志（默认：系统日志；--chat：彩色对话记录）"""
     from secretary.agents import get_worker, _worker_logs_dir
     import threading
     import time
+    import sys
 
     worker_name = getattr(args, "worker_name", None)
     if not worker_name:
-        print(f"用法: {_cli_name()} check <agent_name>")
+        print(f"用法: {_cli_name()} check <agent_name>  [--chat] [-f]")
         return
 
     worker = get_worker(worker_name)
@@ -1150,7 +1375,114 @@ def cmd_check(args):
     pid = worker.get("pid")
     is_running = pid and _check_process_exists(pid)
 
+    type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
+    icon = type_icons.get(agent_type, "❓")
+    status_str = f"运行中 PID={pid}" if is_running else "未运行"
+
     log_dir = _worker_logs_dir(worker_name)
+    follow = getattr(args, "follow", False)
+    chat_mode = getattr(args, "chat", False)
+
+    # ──────────────────────────────────────────────────
+    # --chat 模式：解析 dialog.md，彩色对话渲染
+    # ──────────────────────────────────────────────────
+    if chat_mode:
+        dialog_file = log_dir.parent / "dialog" / "dialog.md"
+        if not dialog_file.exists():
+            print(f"❌ 暂无对话记录: {dialog_file}")
+            print("   💡 对话记录在以下情况下自动生成：")
+            print("      · agent 处理任务时（scanner 运行中）")
+            print(f"      · 使用 {_cli_name()} chat {worker_name} 直接对话时")
+            return
+
+        size = dialog_file.stat().st_size
+        size_str = f"{size / 1024:.1f}KB" if size > 1024 else f"{size}B"
+
+        try:
+            content = dialog_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            print(f"❌ 读取对话文件失败: {e}")
+            return
+
+        if not follow:
+            # 非跟踪模式：直接渲染到终端（终端缓冲区本身可滚动），底部等待 Enter 返回
+            # 不使用系统 pager（Windows more 会在 rich 面板中间插入 -- More -- 破坏布局）
+            try:
+                import io
+                from rich.console import Console
+                from rich.rule import Rule
+                _utf8 = io.TextIOWrapper(
+                    sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+                )
+                _con = Console(highlight=False, file=_utf8, force_terminal=True)
+                _con.print()
+                _con.rule(
+                    f"[bold cyan]{icon} {worker_name}[/bold cyan]"
+                    f"[dim]  {agent_type}  {status_str}  {size_str}[/dim]",
+                    style="cyan dim",
+                )
+                _render_dialog_colored(content, _console=_con)
+                _con.rule("[dim]↑ 向上滚动可查看历史  │  按 Enter 返回[/dim]", style="dim")
+                _utf8.flush()
+                _utf8.detach()  # 释放 buffer，不关闭 sys.stdout
+            except Exception:
+                print(f"\n\033[1;36m{icon} {worker_name}\033[0m  \033[2m{agent_type}  {status_str}  {size_str}\033[0m")
+                _render_dialog_colored(content)
+            # 阻塞，等用户按 Enter（Ctrl+C 也可退出）
+            try:
+                input()
+            except (KeyboardInterrupt, EOFError):
+                pass
+            print("\033[0m", end="", flush=True)  # 重置颜色
+            return
+
+        # -f 跟踪模式：先渲染已有内容，再实时追加
+        print(f"\n\033[1;36m{icon} {worker_name}\033[0m  \033[2m{agent_type}  {status_str}  {size_str}\033[0m")
+        print("\033[2m实时跟踪中…  Ctrl+C 退出\033[0m")
+        _render_dialog_colored(content)
+
+        # 继续实时追加渲染新写入的行
+        stop_event = threading.Event()
+        buf_lines: list[str] = []
+        buf_lock = threading.Lock()
+
+        def _follow_dialog():
+            try:
+                with open(dialog_file, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(0, 2)
+                    while not stop_event.is_set():
+                        chunk = f.read(4096)
+                        if chunk:
+                            with buf_lock:
+                                buf_lines.append(chunk)
+                        else:
+                            time.sleep(0.3)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_follow_dialog, daemon=True)
+        t.start()
+
+        # 定期把新增内容渲染出来
+        accumulated = ""
+        try:
+            while True:
+                time.sleep(0.5)
+                with buf_lock:
+                    if buf_lines:
+                        accumulated += "".join(buf_lines)
+                        buf_lines.clear()
+                if accumulated:
+                    _render_dialog_colored(accumulated)
+                    accumulated = ""
+        except KeyboardInterrupt:
+            stop_event.set()
+            print("\n\033[0m👋 退出对话查看")
+        return
+
+    # ──────────────────────────────────────────────────
+    # 默认模式：scanner.log（纯文本系统日志）
+    # ──────────────────────────────────────────────────
     log_file = log_dir / "scanner.log"
     if not log_file.exists():
         print(f"❌ 没有日志文件: {log_file}")
@@ -1158,88 +1490,52 @@ def cmd_check(args):
             print(f"   💡 先启动: {_cli_name()} hire {worker_name}")
         return
 
-    follow = getattr(args, "follow", False)
+    log_size = log_file.stat().st_size
+    size_str = f"{log_size / 1024:.1f}KB" if log_size > 1024 else f"{log_size}B"
 
-    if follow:
-        # -f 模式：实时跟踪（tail -f），Ctrl+C 退出
-        type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
-        icon = type_icons.get(agent_type, "❓")
-        status_str = f"运行中 PID={pid}" if is_running else "未运行"
-        print(f"\n{icon} {worker_name} — {status_str} | Ctrl+C 退出")
-        print(f"{'─' * 60}")
+    print(f"\n\033[1;36m{icon} {worker_name}\033[0m  \033[2m{agent_type}  {status_str}  {size_str}\033[0m")
+    print(f"\033[2m{'─' * 64}\033[0m")
 
-        # 先打印最后几行
+    # 打印全部日志
+    try:
+        content = log_file.read_text(encoding="utf-8", errors="ignore")
+        print(content, end="")
+    except Exception:
+        pass
+
+    stop_event = threading.Event()
+    last_pos = [log_file.stat().st_size]
+
+    def _tail_log():
         try:
-            lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            for line in lines[-10:]:
-                print(line)
+            while not stop_event.is_set():
+                try:
+                    cur = log_file.stat().st_size
+                    if cur > last_pos[0]:
+                        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                            f.seek(last_pos[0])
+                            chunk = f.read()
+                            if chunk:
+                                print(chunk, end="", flush=True)
+                            last_pos[0] = cur
+                except Exception:
+                    pass
+                time.sleep(0.4)
         except Exception:
             pass
 
-        stop_event = threading.Event()
+    tail_t = threading.Thread(target=_tail_log, daemon=True)
+    tail_t.start()
 
-        def _tail_follow():
-            try:
-                with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-                    f.seek(0, 2)
-                    while not stop_event.is_set():
-                        line = f.readline()
-                        if line:
-                            print(line, end="", flush=True)
-                        else:
-                            try:
-                                if f.tell() > log_file.stat().st_size:
-                                    f.seek(0)
-                            except Exception:
-                                pass
-                            time.sleep(0.1)
-            except Exception as e:
-                if not stop_event.is_set():
-                    print(f"\n⚠️  {e}")
-
-        tail_thread = threading.Thread(target=_tail_follow, daemon=True)
-        tail_thread.start()
-        try:
-            while not stop_event.is_set():
-                time.sleep(0.2)
-        except KeyboardInterrupt:
-            stop_event.set()
-        print(f"\n{'─' * 60}")
-    else:
-        # 默认模式：用 less 翻页浏览全部日志（支持鼠标滚动、搜索、q 退出）
-        log_size = log_file.stat().st_size
-        size_str = f"{log_size / 1024:.1f}KB" if log_size > 1024 else f"{log_size}B"
-        status_str = f"运行中 PID={pid}" if is_running else "未运行"
-
-        # 构建带头部的内容
-        header = (
-            f"{'─' * 60}\n"
-            f" {worker_name} ({agent_type}) — {status_str} | {size_str}\n"
-            f" q 退出 | / 搜索 | g 顶部 | G 底部\n"
-            f"{'─' * 60}\n\n"
-        )
-
-        try:
-            content = header + log_file.read_text(encoding="utf-8", errors="ignore")
-            # 用 less 打开，+G 跳到底部，-R 支持颜色，--mouse 支持鼠标滚动
-            proc = subprocess.Popen(
-                ["less", "-R", "--mouse", "+G"],
-                stdin=subprocess.PIPE,
-                encoding="utf-8",
-                errors="replace",
-            )
-            proc.communicate(input=content)
-        except FileNotFoundError:
-            # less 不可用，退化为直接输出最后 50 行
-            print(header)
-            lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            start = max(0, len(lines) - 50)
-            if start > 0:
-                print(f"  ... (省略前 {start} 行)\n")
-            for line in lines[start:]:
-                print(line)
-        except (BrokenPipeError, KeyboardInterrupt):
-            pass
+    print(f"\n\033[2m{'─' * 60}\033[0m")
+    print("\033[2m实时跟踪中… Ctrl+C 退出\033[0m\n")
+    try:
+        while True:
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        stop_event.set()
+        print(f"\n\033[0m\033[2m{'─' * 60}\033[0m")
+        print("\033[0m👋 退出日志查看")
 
 
 def cmd_clean_logs(args):
@@ -1364,7 +1660,7 @@ def cmd_upgrade(args):
     repo = _find_repo_root()
     if not repo:
         print("❌ 未找到 Kai 源码仓库（仅支持 editable install 方式）")
-        print(f"   如果通过 pip install kai 安装，请用: pip install -U kai")
+        print("   如果通过 pip install kai 安装，请用: pip install -U kai")
         return
 
     name = _cli_name()
@@ -1445,7 +1741,7 @@ def cmd_upgrade(args):
             capture_output=True, text=True, timeout=10, cwd=str(repo),
         )
         if pop.returncode != 0:
-            print(f"   ⚠️  stash 恢复冲突，请手动处理: git stash pop")
+            print("   ⚠️  stash 恢复冲突，请手动处理: git stash pop")
 
     # 5. pip install -e .
     print("   ⏳ 重新安装...")
@@ -1458,7 +1754,8 @@ def cmd_upgrade(args):
         return
 
     # 6. 更新检查状态
-    import json, time
+    import json
+    import time
     check_file = _get_update_check_file()
     check_file.parent.mkdir(parents=True, exist_ok=True)
     check_file.write_text(
@@ -1467,6 +1764,84 @@ def cmd_upgrade(args):
     )
 
     print(f"\n   ✅ 更新完成！重启 {name} 以使用新版本。")
+
+
+# ============================================================
+#  chat 命令 — 向 agent 的 session 直接输入消息
+# ============================================================
+
+def cmd_chat(args):
+    """向指定 agent 的 session 直接发送消息（不走预设对话系统）"""
+    agent_name = getattr(args, "agent_name", None)
+    if not agent_name:
+        print(f"用法: {_cli_name()} chat <agent_name>")
+        return
+
+    from secretary.agents import load_agent_session_id, save_agent_session_id, get_worker
+
+    worker = get_worker(agent_name)
+    if not worker:
+        print(f"❌ Agent '{agent_name}' 不存在")
+        print(f"   提示：使用 {_cli_name()} hire {agent_name} 先招募此 agent")
+        return
+
+    session_id = load_agent_session_id(agent_name)
+
+    agent_type = worker.get("type", "worker")
+    type_icons = {"secretary": "🤖", "worker": "👷", "boss": "👔", "recycler": "♻️"}
+    icon = type_icons.get(agent_type, "❓")
+
+    # 确定 dialog 文件路径（与 check --chat 读取同一文件）
+    dialog_dir = cfg.AGENTS_DIR / agent_name / "dialog"
+    dialog_dir.mkdir(parents=True, exist_ok=True)
+    dialog_file = dialog_dir / "dialog.md"
+
+    if not session_id:
+        print(f"\n{icon} {agent_name} ({agent_type}) — 无历史 session，将以新会话开始")
+    else:
+        print(f"\n{icon} 连接到 {agent_name} ({agent_type}) session: {session_id[:16]}…")
+    print(f"   工作区: {cfg.WORKSPACE}")
+    print(f"   对话记录: {dialog_file}")
+    print("   输入消息直接发送，Ctrl+C 或空行退出\n")
+
+    from secretary.agent_runner import run_agent
+    from datetime import datetime as _dt
+
+    while True:
+        try:
+            user_input = input(f"[{agent_name}] > ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n👋 退出对话")
+            break
+
+        if not user_input or user_input.lower() in ("q", "quit", "exit", "bye"):
+            print("👋 退出对话")
+            break
+
+        # 先将用户消息写入 dialog 文件
+        ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(dialog_file, "a", encoding="utf-8") as _f:
+            _f.write(f"\n{'─'*60}\n[{ts}] 用户\n{'─'*60}\n")
+            _f.write(user_input + "\n")
+
+        result = run_agent(
+            prompt=user_input,
+            workspace=str(cfg.get_workspace()),
+            model=get_model(),
+            verbose=True,
+            session_id=session_id,
+            dialog_file=dialog_file,  # agent 回复也追加到同一文件
+        )
+
+        # 更新 session_id（以防续轮后 id 变化）
+        if result.stats.session_id:
+            session_id = result.stats.session_id
+            save_agent_session_id(agent_name, session_id)
+
+        if not result.success:
+            print(f"❌ 调用失败: {result.output[:300]}")
+
+        print()  # 空行分隔
 
 
 # ============================================================
@@ -1481,11 +1856,11 @@ def cmd_base(args):
         print(f"\n📁 {name} 工作区配置（当前会话）")
         print(f"   当前生效: {cfg.WORKSPACE}")
         print(f"   系统目录: {cfg.BASE_DIR}")
-        print(f"\n   用法:")
+        print("\n   用法:")
         print(f"     {name} base .           设为当前目录")
         print(f"     {name} base /path/to    设为指定路径")
         print(f"     {name} base --clear     清除设定 (回到使用 CWD)")
-        print(f"\n   注意: base 命令仅在当前交互会话中生效，退出后恢复默认。")
+        print("\n   注意: base 命令仅在当前交互会话中生效，退出后恢复默认。")
         return
 
     if args.path == "--clear":
@@ -1499,8 +1874,8 @@ def cmd_base(args):
     cfg.apply_workspace(new_path)
     cfg.ensure_dirs()
     print(f"\n   ✅ 工作区已设定（当前会话）: {new_path}")
-    print(f"   📂 已创建目录结构 (tasks/, ongoing/, reports/, logs/, skills/ ...)")
-    print(f"\n   注意: 此设定仅在当前交互会话中生效，退出后恢复默认。")
+    print("   📂 已创建目录结构 (tasks/, ongoing/, reports/, logs/, skills/ ...)")
+    print("\n   注意: 此设定仅在当前交互会话中生效，退出后恢复默认。")
 
 
 # ============================================================
@@ -1514,7 +1889,7 @@ def cmd_name(args):
 
     if not new_name.isidentifier() and not new_name.replace("-", "").isalnum():
         print(f"❌ 无效的命令名: {new_name}")
-        print(f"   命令名只能包含字母、数字和连字符")
+        print("   命令名只能包含字母、数字和连字符")
         return
 
     if new_name == old_name:
@@ -1532,7 +1907,7 @@ def cmd_name(args):
 
 def cmd_model(args):
     """设置或查看默认模型（支持环境变量 CURSOR_MODEL 优先）"""
-    from secretary.settings import get_model, set_model
+    from secretary.settings import get_model
     name = _cli_name()
 
     if args.model_name is None:
@@ -1546,7 +1921,7 @@ def cmd_model(args):
             print(f"   实际使用: {env_model}")
         else:
             print(f"   当前模型: {current}")
-        print(f"\n   用法:")
+        print("\n   用法:")
         print(f"     {name} model Auto         设置为 Auto (自动选择)")
         print(f"     {name} model gpt-4       设置为 gpt-4")
         print(f"     {name} model claude-3    设置为 claude-3")
@@ -1576,7 +1951,7 @@ def cmd_target(args):
     goal = " ".join(args.goal) if isinstance(args.goal, list) else args.goal
 
     if not goal:
-        print(f"❌ 请提供目标描述")
+        print("❌ 请提供目标描述")
         print(f"   用法: {_cli_name()} target \"目标描述\"")
         print(f"   示例: {_cli_name()} target \"完成登录模块\"")
         return
@@ -1821,7 +2196,7 @@ def cmd_help(args):
             print(cmd_helps[cmd_name])
         else:
             print(f"❌ 未知命令: {cmd_name}")
-            print(f"\n可用命令列表:")
+            print("\n可用命令列表:")
             _print_command_list(name)
             print(f"\n使用 '{name} help' 查看所有命令")
             print(f"使用 '{name} help <命令名>' 查看特定命令的详细帮助")
@@ -1886,12 +2261,18 @@ def _print_command_list(name: str):
 
 def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     """无子命令时进入交互模式。"""
+    # 工作区优先级：--workspace > SECRETARY_WORKSPACE 环境变量 > CWD
+    if not initial_args.workspace and not os.environ.get("SECRETARY_WORKSPACE"):
+        # 始终使用当前工作目录，不读取 kai base 持久化配置
+        cfg.apply_workspace(Path.cwd().resolve())
+    
     if initial_args.workspace:
         ws = Path(initial_args.workspace).resolve()
         cfg.apply_workspace(ws)
 
     name = _cli_name()
-    prompt = f"{name}> "
+    # 彩色提示符：粗体青色名称 + 暗色箭头
+    prompt = f"\033[1;36m{name}\033[0m\033[2m ›\033[0m "
 
     cfg.ensure_dirs()
 
@@ -1903,8 +2284,8 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
 
     from secretary.agents import list_workers
     agents = list_workers()
-    agent_summary = f"{len(agents)} 个 agent" if agents else "无 agent"
-    print(f"\n{name} — {agent_summary} | help 帮助 | exit 退出")
+    agent_summary = f"\033[1m{len(agents)}\033[0m 个 agent" if agents else "\033[2m无 agent\033[0m"
+    print(f"\n\033[1;36m{name}\033[0m  \033[2m—\033[0m  {agent_summary}  \033[2m│  help 帮助  │  exit 退出\033[0m")
 
     # 每日更新检查
     try:
@@ -1928,12 +2309,12 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             print()  # 换行，避免提示符粘在 ^C 后面
             continue
         except EOFError:
-            print(f"\n👋 退出")
+            print("\n\033[0m👋 退出")
             break
         if not line:
             continue
         if line.lower() in ("exit", "quit", "q"):
-            print(f"👋 退出")
+            print("\033[0m👋 退出")
             break
 
         try:
@@ -1971,10 +2352,10 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
         try:
             args = parser.parse_args(parts)
         except SystemExit:
-            print(f"  未知命令。输入 help 查看可用命令")
+            print("  未知命令。输入 help 查看可用命令")
             continue
         if not getattr(args, "command", None):
-            print(f"  输入 help 查看可用命令")
+            print("  输入 help 查看可用命令")
             continue
 
         # base / name / model / help 不需要 ensure_dirs
@@ -2220,6 +2601,9 @@ Agent管理 (hire 统一入口):
     p = subparsers.add_parser("check", help="📺 查看 agent 日志（翻页浏览，q 退出）")
     p.add_argument("worker_name", help="agent 名称")
     p.add_argument("-f", "--follow", action="store_true", help="实时跟踪模式（类似 tail -f）")
+    p.add_argument("--chat", action="store_true", help="查看对话内容（dialog/ 目录）而非系统日志")
+    p = subparsers.add_parser("chat", help="💬 向 agent 的 session 直接发送消息")
+    p.add_argument("agent_name", help="agent 名称")
     subparsers.add_parser("clean-logs", help="🧹 清理 logs/ 下的日志文件")
     subparsers.add_parser("clean-processes", help="🧹 清理泄露的 worker 进程记录")
 
@@ -2239,6 +2623,7 @@ Agent管理 (hire 统一入口):
         "recycle": cmd_recycle,
         "monitor": cmd_monitor,
         "check": cmd_check,
+        "chat": cmd_chat,
         "clean-logs": cmd_clean_logs,
         "clean-processes": cmd_clean_processes,
         "upgrade": cmd_upgrade,
@@ -2261,10 +2646,15 @@ Agent管理 (hire 统一入口):
         _run_interactive_loop(parser, args, handlers, skill_names)
         return
 
-    # --workspace 临时覆盖 (不保存)
+    # 工作区优先级：--workspace > SECRETARY_WORKSPACE 环境变量 > CWD
+    # 注意：kai base 的持久化配置不再自动生效，避免移动项目目录后使用旧路径导致混乱。
+    # 若需固定工作区，请设置环境变量 SECRETARY_WORKSPACE 或每次使用 --workspace。
     if args.workspace:
         ws = Path(args.workspace).resolve()
         cfg.apply_workspace(ws)
+    elif not os.environ.get("SECRETARY_WORKSPACE"):
+        # 没有 --workspace 和环境变量时，始终使用当前工作目录
+        cfg.apply_workspace(Path.cwd().resolve())
     
     # 初始化 agent 类型注册表（在启动时自动加载自定义类型）
     try:

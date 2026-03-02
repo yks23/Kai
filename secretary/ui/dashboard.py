@@ -7,10 +7,8 @@ kai 实时监控面板 — 简化的 Agent 状态监控
   - q 退出
   - 支持文本模式 (--text / --once)
 """
-import time
 import threading
 import sys
-from pathlib import Path
 from datetime import datetime
 
 # 使用公共的键盘输入处理

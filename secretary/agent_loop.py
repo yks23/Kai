@@ -18,7 +18,7 @@ def load_prompt(template_name: str) -> str:
     2. secretary/prompts/ (包内默认)
     
     Args:
-        template_name: 模板文件名，如 'secretary.md', 'recycler.md'
+        template_name: 模板文件名，如 'secretary_first.md', 'worker_first.md'
         
     Returns:
         模板内容字符串

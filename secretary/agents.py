@@ -85,7 +85,6 @@ from secretary.agent_paths import (
     _worker_logs_dir,
     _worker_stats_dir,
     _worker_reports_dir,
-    _worker_memory_file,
 )
 
 
@@ -147,37 +146,10 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         (recycler_dir / "unsolved").mkdir(parents=True, exist_ok=True)
         _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
     elif agent_type == "boss":
+        _worker_tasks_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_stats_dir(agent_name).mkdir(parents=True, exist_ok=True)
     
-    # 初始化 memory.md（如果不存在）
-    memory_file = _worker_memory_file(agent_name)
-    if not memory_file.exists():
-        agent_dir = _worker_dir(agent_name)
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        extra_lines = ""
-        if agent_type == "worker":
-            extra_lines = (
-                f"- 任务目录: `{_worker_tasks_dir(agent_name)}`\n"
-                f"- 执行目录: `{_worker_ongoing_dir(agent_name)}`\n"
-            )
-        history_label = {
-            "worker": "工作历史和状态",
-            "secretary": "任务分配历史",
-            "boss": "任务生成历史",
-            "recycler": "报告审查历史",
-        }.get(agent_type, "工作历史")
-        memory_file.write_text(
-            f"# {agent_name} 的工作总结\n\n"
-            f"## 基本信息\n"
-            f"- 工作目录: `{agent_dir}`\n"
-            f"{extra_lines}"
-            f"- 创建时间: {now_str}\n\n"
-            f"## 工作总结\n\n"
-            f"（此文件由系统自动维护，记录 {agent_name} 的{history_label}）\n",
-            encoding="utf-8"
-        )
-
     return info
 
 
@@ -266,7 +238,7 @@ def increment_completed_tasks(agent_name: str):
 
 
 def record_task_completion(worker_name: str, task_name: str):
-    """记录 agent 完成了一个任务，并更新 worker 的 memory.md（保留用于向后兼容）"""
+    """记录 agent 完成了一个任务"""
     reg = _load_registry()
     if worker_name not in reg["workers"]:
         return
@@ -275,41 +247,6 @@ def record_task_completion(worker_name: str, task_name: str):
     recent.append(task_name)
     w["recent_tasks"] = recent[-20:]  # 只保留最近 20 条
     _save_registry(reg)
-    
-    # 更新 worker 的 memory.md
-    _update_worker_memory(worker_name, task_name)
-
-
-def _update_worker_memory(worker_name: str, task_name: str):
-    """更新 worker 的 memory.md，记录完成的任务"""
-    memory_file = _worker_memory_file(worker_name)
-
-    if memory_file.exists():
-        content = memory_file.read_text(encoding="utf-8")
-    else:
-        worker_dir = _worker_dir(worker_name)
-        content = (
-            f"# {worker_name} 的工作总结\n\n"
-            f"## 基本信息\n"
-            f"- 工作目录: `{worker_dir}`\n"
-            f"- 创建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"## 工作总结\n\n"
-        )
-
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    new_entry = f"\n### [{timestamp}] 完成任务: {task_name}\n"
-
-    if "## 工作总结" in content:
-        parts = content.split("## 工作总结", 1)
-        header = parts[0] + "## 工作总结"
-        rest = parts[1].lstrip() if len(parts) == 2 else ""
-        if rest.startswith("（此文件由系统自动维护"):
-            rest = ""
-        content = header + "\n\n" + new_entry + rest
-    else:
-        content += "\n## 工作总结\n\n" + new_entry + "\n"
-
-    memory_file.write_text(content, encoding="utf-8")
 
 
 def get_worker_names() -> set[str]:
@@ -408,12 +345,80 @@ def pick_available_name(preferred_names: list[str] | None = None) -> str:
     return f"agent-{i}"
 
 
+def save_agent_session_id(agent_name: str, session_id: str) -> None:
+    """将 agent 最新的 session_id 持久化到 agents/{name}/session.id"""
+    if not session_id:
+        return
+    session_file = cfg.AGENTS_DIR / agent_name / "session.id"
+    try:
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        session_file.write_text(session_id, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_agent_session_id(agent_name: str) -> str:
+    """读取 agent 持久化的 session_id，不存在时返回空字符串"""
+    session_file = cfg.AGENTS_DIR / agent_name / "session.id"
+    if session_file.exists():
+        try:
+            return session_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def build_known_agents_section(current_agent_name: str = "") -> str:
+    """
+    构建已知 agent 列表（供注入到提示词中）。
+    列出所有已注册 agent（排除当前 agent 自身），说明其类型、描述、调用方式。
+    对 worker 类型还附加当前队列状态，以辅助负载均衡决策。
+    每个 agent 可视为一个工具：向其 tasks/ 目录写入任务文件即可调用。
+    """
+    agents = list_workers()
+    if not agents:
+        return ""
+
+    _type_desc = {
+        "secretary": "任务分类与分配",
+        "boss": "监控 worker 并持续生成任务",
+        "recycler": "审查任务完成报告",
+        "worker": "执行编程任务",
+    }
+
+    lines = ["## 已知 Agent（可调用的工具）", "向对应 agent 的 tasks/ 目录写入任务文件即可调用。", ""]
+    found = False
+    for a in agents:
+        name = a.get("name", "")
+        if name == current_agent_name:
+            continue
+        agent_type = a.get("type", "worker")
+        desc = a.get("description", "") or _type_desc.get(agent_type, "通用 agent")
+        tasks_dir = _worker_tasks_dir(name)
+        lines.append(f"### {name} ({agent_type})")
+        lines.append(f"- **描述**: {desc}")
+        lines.append(f"- **任务目录**: `{tasks_dir}`")
+        if agent_type == "worker":
+            completed = a.get("completed_tasks", 0)
+            pending   = a.get("pending_count", 0)
+            ongoing   = a.get("ongoing_count", 0)
+            recent    = a.get("recent_tasks", [])
+            recent_str = "、".join(recent[-3:]) if recent else "暂无"
+            lines.append(
+                f"- **状态**: 已完成 {completed} | 待处理 {pending} | 执行中 {ongoing}"
+                + (f"  最近: {recent_str}" if recent else "")
+            )
+        lines.append("")
+        found = True
+
+    return "\n".join(lines) if found else ""
+
+
 def build_workers_summary() -> str:
     """
     构建 worker 信息摘要 (供秘书 Agent 提示词使用)。
     只包含 worker 类型的 agent，不包括 secretary、boss、recycler 等其他类型。
     包含每个 worker 的名字、目录、擅长方向、已完成任务等。
-    同时读取每个 worker 的 memory.md 文件内容。
     """
     workers = list_workers()
     if not workers:
@@ -435,23 +440,12 @@ def build_workers_summary() -> str:
         pending = w.get("pending_count", 0)
         ongoing = w.get("ongoing_count", 0)
 
-        # 读取 worker 的 memory.md 内容
-        memory_file = _worker_memory_file(name)
-        worker_memory = ""
-        if memory_file.exists():
-            try:
-                worker_memory = memory_file.read_text(encoding="utf-8").strip()
-            except Exception:
-                worker_memory = "(无法读取工作总结)"
-
         lines.append(
             f"### 工人: {name}\n"
             f"- **描述**: {desc}\n"
             f"- **任务目录**: `{tasks_dir}`\n"
             f"- **状态**: 已完成 {completed} 个任务 | 待处理 {pending} 个 | 执行中 {ongoing} 个\n"
             f"- **最近完成**: {recent_str}\n"
-            f"\n#### {name} 的工作总结\n"
-            f"{worker_memory}\n"
         )
 
     return "\n".join(lines)

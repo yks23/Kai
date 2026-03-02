@@ -4,7 +4,7 @@
 每个 agent 类型通过配置来定义：
 - 触发规则（统一：监视目录是否有文件或为空）
 - 终止条件（secretary/boss/recycler：单次执行；worker：直到删除ongoing文件）
-- 提示词模板（secretary.md、boss.md、recycler.md、worker_first_round.md等）
+- 提示词模板（secretary_first.md、boss_first.md、recycler_first.md、worker_first.md等）
 - 处理逻辑（如何调用agent）
 
 注意：具体的 agent 类型定义已移至 secretary/agent_types/ 目录
@@ -99,6 +99,9 @@ class AgentConfig:
     
     # 日志文件（有默认值）
     log_file: Path | None = None
+
+    # 对话目录（有默认值）— agent 每次调用的对话内容写入此目录，不写入 scanner.log
+    dialog_dir: Path | None = None
 
 
 
