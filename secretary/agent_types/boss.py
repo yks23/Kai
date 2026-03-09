@@ -127,12 +127,19 @@ def _get_completed_tasks_summary(worker_name: str) -> str:
 
 
 def build_boss_continue_prompt(boss_dir: Path) -> str:
-    """构建 Boss 续轮提示词 — 已有会话时使用简短指令"""
+    """构建 Boss 续轮提示词 — 简短指令；仅当 known_agents 发生变化时才重新发送"""
+    from secretary.agents import build_known_agents_section, known_agents_changed
     goal = _load_boss_goal(boss_dir)
     worker_name = _load_boss_worker_name(boss_dir)
     w_tasks = _worker_tasks_dir(worker_name) if worker_name else cfg.BASE_DIR
+    boss_name = boss_dir.name
+    ka_section = build_known_agents_section(boss_name) if known_agents_changed(boss_name) else ""
     template = load_prompt("boss_continue.md")
-    return template.format(goal=goal, worker_tasks_dir=w_tasks)
+    return template.format(
+        goal=goal,
+        worker_tasks_dir=w_tasks,
+        known_agents_section=ka_section,
+    )
 
 
 def build_boss_prompt(task_file: Path, boss_dir: Path) -> str:
@@ -183,8 +190,8 @@ def run_boss(task_file: Path, boss_dir: Path, verbose: bool = True,
 
     worker_tasks_dir   = _worker_tasks_dir(worker_name)
     worker_ongoing_dir = _worker_ongoing_dir(worker_name)
-    pending_count = len(list(worker_tasks_dir.glob("*.md"))) if worker_tasks_dir.exists() else 0
-    ongoing_count = len(list(worker_ongoing_dir.glob("*.md"))) if worker_ongoing_dir.exists() else 0
+    pending_count = len([f for f in worker_tasks_dir.iterdir() if f.is_file()]) if worker_tasks_dir.exists() else 0
+    ongoing_count = len([f for f in worker_ongoing_dir.iterdir() if f.is_file()]) if worker_ongoing_dir.exists() else 0
     if pending_count > 0 or ongoing_count > 0:
         if verbose:
             print(f"ℹ️ Worker '{worker_name}' 队列不为空，无需生成新任务")
@@ -275,7 +282,7 @@ class BossAgent(AgentType):
             # 检查自己的 tasks/（全局目标，通常是 goal.md）
             boss_tasks_dir = config.input_dir
             if boss_tasks_dir.exists():
-                goal_files = list(boss_tasks_dir.glob("*.md"))
+                goal_files = [f for f in boss_tasks_dir.iterdir() if f.is_file()]
                 if goal_files:
                     # 有自己的任务（全局目标），触发
                     return [config.base_dir / ".boss_trigger_marker"]

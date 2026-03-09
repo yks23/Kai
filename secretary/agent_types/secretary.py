@@ -72,10 +72,15 @@ def _load_goals(secretary_name: str) -> str:
 #  提示词构建
 # ============================================================
 
-def build_secretary_continue_prompt(task_file: Path) -> str:
-    """续轮提示词 — 简短指令，agent 自行读取文件"""
+def build_secretary_continue_prompt(task_file: Path, secretary_name: str = "") -> str:
+    """续轮提示词 — 简短指令；仅当 known_agents 发生变化时才重新发送"""
+    from secretary.agents import build_known_agents_section, known_agents_changed
+    ka_section = build_known_agents_section(secretary_name) if (secretary_name and known_agents_changed(secretary_name)) else ""
     template = load_prompt("secretary_continue.md")
-    return template.format(task_file=task_file)
+    return template.format(
+        task_file=task_file,
+        known_agents_section=ka_section,
+    )
 
 
 def build_secretary_prompt(task_file: Path, secretary_name: str) -> str:
@@ -96,6 +101,7 @@ def build_secretary_prompt(task_file: Path, secretary_name: str) -> str:
     goals_section = "\n## 当前全局目标\n" + goals_text + "\n" if goals_text else ""
 
     report_filename = task_file.stem + "-report.md"
+    from secretary.agents import build_skills_section
     template = load_prompt("secretary_first.md")
     return template.format(
         base_dir=cfg.BASE_DIR,
@@ -105,6 +111,7 @@ def build_secretary_prompt(task_file: Path, secretary_name: str) -> str:
         report_filename=report_filename,
         reports_dir=cfg.AGENTS_DIR / secretary_name / "reports",
         known_agents_section=known_agents_section,
+        skills_section=build_skills_section(secretary_name, cfg.BASE_DIR),
     )
 
 
@@ -116,7 +123,7 @@ def run_secretary(task_file: Path, verbose: bool = True, secretary_name: str = "
                   dialog_file=None) -> bool:
     """运行秘书 Agent 处理任务文件。返回是否成功。"""
     first   = build_secretary_prompt(task_file, secretary_name)
-    cont    = build_secretary_continue_prompt(task_file)
+    cont    = build_secretary_continue_prompt(task_file, secretary_name)
     result  = run_agent_with_session(
         secretary_name, first, cont,
         dialog_file=dialog_file, verbose=verbose,

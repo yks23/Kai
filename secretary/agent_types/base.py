@@ -80,7 +80,10 @@ def run_agent_with_session(
     - 无 session_id    → 发首轮提示词（完整角色定义）
     执行后自动持久化 session_id。
     """
-    from secretary.agents import load_agent_session_id, save_agent_session_id
+    from secretary.agents import (
+        load_agent_session_id, save_agent_session_id,
+        save_known_agents_snapshot, get_agent_known_agents,
+    )
     from secretary.agent_runner import run_agent
     from secretary.settings import get_model
     import secretary.config as cfg
@@ -106,5 +109,7 @@ def run_agent_with_session(
 
     if result.stats.session_id:
         save_agent_session_id(agent_name, result.stats.session_id)
+    # 记录本次发送的 known_agents 快照，下次续轮可据此判断是否需要重发
+    save_known_agents_snapshot(agent_name, get_agent_known_agents(agent_name))
 
     return result

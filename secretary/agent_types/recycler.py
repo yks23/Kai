@@ -71,10 +71,15 @@ def _get_recycler_dirs(recycler_name: str = "recycler") -> tuple[Path, Path]:
     return solved_dir, unsolved_dir
 
 
-def build_recycler_continue_prompt(report_file: Path) -> str:
-    """构建回收者续轮提示词 — 已有会话时使用简短指令"""
+def build_recycler_continue_prompt(report_file: Path, recycler_name: str = "recycler") -> str:
+    """构建回收者续轮提示词 — 简短指令；仅当 known_agents 发生变化时才重新发送"""
+    from secretary.agents import build_known_agents_section, known_agents_changed
+    ka_section = build_known_agents_section(recycler_name) if known_agents_changed(recycler_name) else ""
     template = load_prompt("recycler_continue.md")
-    return template.format(report_file=report_file)
+    return template.format(
+        report_file=report_file,
+        known_agents_section=ka_section,
+    )
 
 
 def build_recycler_prompt(report_file: Path, recycler_name: str = "recycler") -> str:
@@ -202,7 +207,7 @@ def process_report(report_file: Path, recycler_config: AgentConfig | None = None
         print(f"\n[回收者 {recycler_name}] ▶ {report_file.name}")
 
     first  = build_recycler_prompt(report_file, recycler_name=recycler_name)
-    cont   = build_recycler_continue_prompt(report_file)
+    cont   = build_recycler_continue_prompt(report_file, recycler_name=recycler_name)
     result = run_agent_with_session(
         recycler_name, first, cont,
         dialog_file=dialog_file, verbose=verbose,

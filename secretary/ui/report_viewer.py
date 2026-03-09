@@ -32,7 +32,7 @@ def _collect_worker_tasks(worker_name: str) -> list[dict]:
     # 1. 待处理任务
     tasks_dir = _worker_tasks_dir(worker_name)
     if tasks_dir.exists():
-        for task_file in tasks_dir.glob("*.md"):
+        for task_file in (f for f in tasks_dir.iterdir() if f.is_file()):
             mtime = task_file.stat().st_mtime
             try:
                 content = task_file.read_text(encoding="utf-8")
@@ -62,7 +62,7 @@ def _collect_worker_tasks(worker_name: str) -> list[dict]:
     # 2. 执行中任务
     ongoing_dir = _worker_ongoing_dir(worker_name)
     if ongoing_dir.exists():
-        for task_file in ongoing_dir.glob("*.md"):
+        for task_file in (f for f in ongoing_dir.iterdir() if f.is_file()):
             mtime = task_file.stat().st_mtime
             try:
                 content = task_file.read_text(encoding="utf-8")

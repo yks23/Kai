@@ -94,11 +94,17 @@ from secretary.agent_paths import (
 #  CRUD
 # ============================================================
 
-def register_agent(agent_name: str, agent_type: str = "worker", description: str = "") -> dict:
+def register_agent(agent_name: str, agent_type: str = "worker", description: str = "", known_agents: list[str] | None = None, skills: list[str] | None = None) -> dict:
     """
     注册一个新 agent（统一接口，支持类型）。
     创建专属目录 {name}/tasks 和 {name}/ongoing。
     返回 agent 信息字典。
+    
+    Args:
+        agent_name: Agent 名称
+        agent_type: Agent 类型 (worker/secretary/boss/recycler 或自定义类型)
+        description: Agent 描述
+        known_agents: 初始 known_agents 列表（如果为 None，默认为空列表）
     """
     reg = _load_registry()
 
@@ -111,6 +117,20 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         if agent_type and reg["workers"][agent_name].get("type") != agent_type:
             reg["workers"][agent_name]["type"] = agent_type
             updated = True
+        # 如果提供了 known_agents，也更新（合并，去重）
+        if known_agents is not None:
+            existing_ka = set(reg["workers"][agent_name].get("known_agents", []))
+            new_ka = set(known_agents)
+            if existing_ka != new_ka:
+                reg["workers"][agent_name]["known_agents"] = list(new_ka)
+                updated = True
+        # 如果提供了 skills，也更新
+        if skills is not None:
+            existing_skills = set(reg["workers"][agent_name].get("skills", []))
+            new_skills = set(skills)
+            if existing_skills != new_skills:
+                reg["workers"][agent_name]["skills"] = list(new_skills)
+                updated = True
         if updated:
             _save_registry(reg)
         return reg["workers"][agent_name]
@@ -123,6 +143,8 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         "completed_tasks": 0,
         "recent_tasks": [],      # 最近完成的任务名列表 (最多保留 20 条)
         "specialties": [],       # 擅长方向 (由秘书历史推断)
+        "known_agents": list(known_agents) if known_agents is not None else [],  # 显式列表；空 = 不认识任何人，需手动 link
+        "skills": list(skills) if skills is not None else [],  # agent 拥有的技能列表（如 ["command_system"]）
         "status": "idle",        # idle / busy / offline
         "pid": None,             # 运行时填入 scanner 的 PID
         "executing": False,      # 是否正在执行任务（process_fn 被触发）
@@ -149,7 +171,7 @@ def register_agent(agent_name: str, agent_type: str = "worker", description: str
         _worker_tasks_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_reports_dir(agent_name).mkdir(parents=True, exist_ok=True)
         _worker_stats_dir(agent_name).mkdir(parents=True, exist_ok=True)
-    
+
     return info
 
 
@@ -189,8 +211,8 @@ def list_workers() -> list[dict]:
         info = dict(info)  # copy
         td = _worker_tasks_dir(name)
         od = _worker_ongoing_dir(name)
-        info["pending_count"] = len(list(td.glob("*.md"))) if td.exists() else 0
-        info["ongoing_count"] = len(list(od.glob("*.md"))) if od.exists() else 0
+        info["pending_count"] = len([f for f in td.iterdir() if f.is_file()]) if td.exists() else 0
+        info["ongoing_count"] = len([f for f in od.iterdir() if f.is_file()]) if od.exists() else 0
         workers.append(info)
     return workers
 
@@ -203,8 +225,8 @@ def get_worker(worker_name: str) -> dict | None:
     info = dict(reg["workers"][worker_name])
     td = _worker_tasks_dir(worker_name)
     od = _worker_ongoing_dir(worker_name)
-    info["pending_count"] = len(list(td.glob("*.md"))) if td.exists() else 0
-    info["ongoing_count"] = len(list(od.glob("*.md"))) if od.exists() else 0
+    info["pending_count"] = len([f for f in td.iterdir() if f.is_file()]) if td.exists() else 0
+    info["ongoing_count"] = len([f for f in od.iterdir() if f.is_file()]) if od.exists() else 0
     return info
 
 
@@ -368,14 +390,157 @@ def load_agent_session_id(agent_name: str) -> str:
     return ""
 
 
+# ============================================================
+#  Known-agent graph API
+# ============================================================
+
+def get_agent_known_agents(agent_name: str) -> list | None:
+    """
+    返回 agent 的显式 known_agents 列表。
+    新建 agent 默认为 []（不认识任何人）。
+    仅旧数据可能返回 None（向后兼容，表示认识所有人）。
+    """
+    reg = _load_registry()
+    info = reg["workers"].get(agent_name, {})
+    return info.get("known_agents", None)
+
+
+def _known_agents_sent_file(agent_name: str) -> Path:
+    return cfg.AGENTS_DIR / agent_name / "known_agents_sent.json"
+
+
+def save_known_agents_snapshot(agent_name: str, known: list | None) -> None:
+    """记录本次发送给 agent 的 known_agents 列表（用于下次比较）"""
+    import json as _json
+    fp = _known_agents_sent_file(agent_name)
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fp.write_text(_json.dumps(sorted(known) if known else []), encoding="utf-8")
+
+
+def known_agents_changed(agent_name: str) -> bool:
+    """当前 known_agents 是否与上次发送时不同（需要重新发送）"""
+    import json as _json
+    fp = _known_agents_sent_file(agent_name)
+    current = get_agent_known_agents(agent_name)
+    current_sorted = sorted(current) if current else []
+    if not fp.exists():
+        return True  # 从未发送过
+    try:
+        last = _json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        return True
+    return current_sorted != last
+
+
+def set_agent_known_agents(agent_name: str, known: list):
+    """替换 agent 的 known_agents 列表（空列表 = 不认识任何人）。"""
+    reg = _load_registry()
+    if agent_name in reg["workers"]:
+        reg["workers"][agent_name]["known_agents"] = list(known)
+        _save_registry(reg)
+
+
+def add_known_agent_link(from_agent: str, to_agent: str):
+    """在 from_agent → to_agent 之间添加链接。"""
+    reg = _load_registry()
+    if from_agent not in reg["workers"] or to_agent not in reg["workers"]:
+        return
+    current = reg["workers"][from_agent].get("known_agents", None)
+    if current is None:
+        # 从"全认识"转换为显式列表，再加上 to_agent
+        all_names = [n for n in reg["workers"] if n != from_agent]
+        current = all_names
+    if to_agent not in current:
+        current.append(to_agent)
+    reg["workers"][from_agent]["known_agents"] = current
+    _save_registry(reg)
+
+
+def remove_known_agent_link(from_agent: str, to_agent: str):
+    """删除 from_agent → to_agent 的链接。"""
+    reg = _load_registry()
+    if from_agent not in reg["workers"]:
+        return
+    current = reg["workers"][from_agent].get("known_agents", None)
+    if current is None:
+        # 从"全认识"转换为显式列表，排除 to_agent
+        all_names = [n for n in reg["workers"] if n != from_agent and n != to_agent]
+        current = all_names
+    else:
+        current = [n for n in current if n != to_agent]
+    reg["workers"][from_agent]["known_agents"] = current
+    _save_registry(reg)
+
+
+def get_graph_data() -> dict:
+    """返回用于前端图谱渲染的节点和有向边数据。
+
+    规则:
+    - 所有已注册的 agent 都作为节点，不管有没有链接
+    - 只有 known_agents 字段为显式列表时才生成有向边
+    - known_agents=null（隐式认识所有人）不绘制边，避免全连接图混乱；
+      前端在节点面板中用文字说明即可
+    """
+    agents = list_workers()
+    all_names = {a["name"] for a in agents}
+    nodes = []
+    edges = []
+    seen_edges: set[tuple[str, str]] = set()
+    for a in agents:
+        name = a["name"]
+        pid = a.get("pid")
+        is_running = bool(pid and _pid_alive_local(pid))
+        nodes.append({
+            "name": name,
+            "type": a.get("type", "worker"),
+            "description": a.get("description", ""),
+            "is_running": is_running,
+            "executing": bool(a.get("executing")),
+            "completed_tasks": a.get("completed_tasks", 0),
+            "pending_count": a.get("pending_count", 0),
+        })
+        known = a.get("known_agents", None)
+        # Only draw explicit edges (known_agents is a list, not null)
+        if known is not None:
+            for t in known:
+                if t in all_names and t != name and (name, t) not in seen_edges:
+                    edges.append({"from": name, "to": t})
+                    seen_edges.add((name, t))
+    return {"nodes": nodes, "edges": edges}
+
+
+def _pid_alive_local(pid: int) -> bool:
+    try:
+        import os as _os
+        _os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def build_known_agents_section(current_agent_name: str = "") -> str:
     """
     构建已知 agent 列表（供注入到提示词中）。
-    列出所有已注册 agent（排除当前 agent 自身），说明其类型、描述、调用方式。
-    对 worker 类型还附加当前队列状态，以辅助负载均衡决策。
+    若 agent 设置了显式 known_agents 列表则只列出其中的 agent，
+    否则列出所有其他 agent（向后兼容）。
     每个 agent 可视为一个工具：向其 tasks/ 目录写入任务文件即可调用。
     """
-    agents = list_workers()
+    all_agents = list_workers()
+    if not all_agents:
+        return ""
+
+    # 确定本 agent 可见的 known agents
+    if current_agent_name:
+        reg = _load_registry()
+        explicit = reg["workers"].get(current_agent_name, {}).get("known_agents", None)
+        if explicit is not None:
+            visible_names = set(explicit)
+            agents = [a for a in all_agents if a.get("name") in visible_names]
+        else:
+            agents = [a for a in all_agents if a.get("name") != current_agent_name]
+    else:
+        agents = [a for a in all_agents if a.get("name") != current_agent_name]
+
     if not agents:
         return ""
 
@@ -390,8 +555,6 @@ def build_known_agents_section(current_agent_name: str = "") -> str:
     found = False
     for a in agents:
         name = a.get("name", "")
-        if name == current_agent_name:
-            continue
         agent_type = a.get("type", "worker")
         desc = a.get("description", "") or _type_desc.get(agent_type, "通用 agent")
         tasks_dir = _worker_tasks_dir(name)
@@ -412,6 +575,54 @@ def build_known_agents_section(current_agent_name: str = "") -> str:
         found = True
 
     return "\n".join(lines) if found else ""
+
+
+def build_skills_section(agent_name: str, base_dir: Path) -> str:
+    """
+    构建技能部分（供注入到提示词中）。
+    如果 agent 有技能，则加载对应的技能文件内容。
+    """
+    from pathlib import Path as PathLib
+    reg = _load_registry()
+    agent_info = reg["workers"].get(agent_name, {})
+    skills = agent_info.get("skills", [])
+    
+    if not skills:
+        return ""
+    
+    lines = []
+    for skill_name in skills:
+        # 先尝试从 BASE_DIR/agent_skills 加载，再尝试从包内加载
+        skill_file = base_dir / "agent_skills" / f"{skill_name}.md"
+        if not skill_file.exists():
+            # 尝试从包内加载
+            pkg_skill_file = PathLib(__file__).parent / "agent_skills" / f"{skill_name}.md"
+            if pkg_skill_file.exists():
+                skill_file = pkg_skill_file
+        
+        if skill_file.exists():
+            content = skill_file.read_text(encoding="utf-8")
+            # 提取技能内容（跳过标题和描述，从"## 技能说明"开始）
+            skill_lines = []
+            in_skill_section = False
+            for line in content.splitlines():
+                if line.strip().startswith("## 技能说明"):
+                    in_skill_section = True
+                    continue
+                if in_skill_section:
+                    # 替换模板变量
+                    line = line.replace("{commands_dir}", str(base_dir / "commands"))
+                    line = line.replace("{base_dir}", str(base_dir))
+                    line = line.replace("{skills_dir}", str(base_dir / "skills"))
+                    skill_lines.append(line)
+            
+            if skill_lines:
+                if not lines:  # 只在第一次添加标题
+                    lines.append("## 技能")
+                lines.extend(skill_lines)
+                lines.append("")
+    
+    return "\n".join(lines) if lines else ""
 
 
 def build_workers_summary() -> str:
@@ -450,3 +661,74 @@ def build_workers_summary() -> str:
 
     return "\n".join(lines)
 
+
+# ============================================================
+#  Custom Agent Types — 用户自定义类型 (持久化到 agents.json)
+# ============================================================
+
+_BUILTIN_TYPES = {"worker", "secretary", "boss", "recycler"}
+
+
+def list_custom_types() -> list[dict]:
+    """列出所有自定义 agent 类型"""
+    reg = _load_registry()
+    return list(reg.get("custom_types", {}).values())
+
+
+def get_custom_type(type_name: str) -> dict | None:
+    """获取自定义 agent 类型"""
+    reg = _load_registry()
+    return reg.get("custom_types", {}).get(type_name)
+
+
+def register_custom_type(
+    type_name: str,
+    base_type: str,
+    first_prompt: str,
+    continue_prompt: str,
+    description: str = "",
+) -> dict:
+    """
+    注册一个自定义 agent 类型。
+
+    Args:
+        type_name: 类型名称（不能与内置类型重名）
+        base_type: 基类类型，决定触发规则和目录结构 (worker/secretary/boss/recycler)
+        first_prompt: 首轮提示词内容（完整 markdown）
+        continue_prompt: 续轮提示词内容（简短 markdown）
+        description: 类型描述
+
+    Returns:
+        类型信息字典
+    """
+    if type_name in _BUILTIN_TYPES:
+        raise ValueError(f"不能覆盖内置类型: {type_name}")
+    if base_type not in _BUILTIN_TYPES:
+        raise ValueError(f"base_type 必须是 {_BUILTIN_TYPES} 之一")
+
+    reg = _load_registry()
+    if "custom_types" not in reg:
+        reg["custom_types"] = {}
+
+    info = {
+        "name": type_name,
+        "base_type": base_type,
+        "description": description,
+        "first_prompt": first_prompt,
+        "continue_prompt": continue_prompt,
+        "created_at": datetime.now().isoformat(),
+    }
+    reg["custom_types"][type_name] = info
+    _save_registry(reg)
+    return info
+
+
+def delete_custom_type(type_name: str) -> bool:
+    """删除自定义 agent 类型，返回是否成功"""
+    reg = _load_registry()
+    ct = reg.get("custom_types", {})
+    if type_name not in ct:
+        return False
+    del ct[type_name]
+    _save_registry(reg)
+    return True

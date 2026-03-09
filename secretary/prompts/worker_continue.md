@@ -1,3 +1,5 @@
 任务文件: `{task_file}`（文件存在说明任务未完成）
 
+{known_agents_section}
+
 按照之前的工作流程继续推进。完成后删除任务文件并在 `{report_dir}` 创建报告。

@@ -126,8 +126,8 @@ def _get_trigger_debug_info(config: AgentConfig) -> str:
                 info_parts.append(f"{watch_dir.name}: 目录不存在（视为空，满足条件）")
             continue
         
-        md_files = list(watch_dir.glob("*.md"))
-        file_count = len(md_files)
+        task_files = [f for f in watch_dir.iterdir() if f.is_file()] if watch_dir.exists() else []
+        file_count = len(task_files)
         has_files = file_count > 0
         
         if trigger.condition == TriggerCondition.HAS_FILES:
@@ -147,25 +147,25 @@ def _get_trigger_debug_info(config: AgentConfig) -> str:
         # 条件满足，检查是否有可执行文件
         if trigger.condition == TriggerCondition.HAS_FILES:
             if config.use_ongoing and config.processing_dir.exists() and config.processing_dir in trigger.watch_dirs:
-                ongoing_files = [f for f in config.processing_dir.glob("*.md") if _is_executable_task(f)]
+                ongoing_files = [f for f in config.processing_dir.iterdir() if f.is_file() and _is_executable_task(f)]
                 if ongoing_files:
                     info_parts.append(f"→ 触发: processing目录有 {len(ongoing_files)} 个可执行文件")
                     return " | ".join(info_parts)
             
             if config.input_dir in trigger.watch_dirs and config.input_dir.exists():
-                all_md = list(config.input_dir.glob("*.md"))
-                executable = [p for p in all_md if _is_executable_task(p)]
-                non_executable = [p for p in all_md if not _is_executable_task(p)]
+                all_files = [f for f in config.input_dir.iterdir() if f.is_file()]
+                executable = [p for p in all_files if _is_executable_task(p)]
+                non_executable = [p for p in all_files if not _is_executable_task(p)]
                 
                 # 详细记录文件信息
-                if all_md:
+                if all_files:
                     file_details = []
-                    for f in all_md[:5]:  # 最多显示5个文件
+                    for f in all_files[:5]:  # 最多显示5个文件
                         scope = _get_task_execution_scope(f)
                         is_exec = _is_executable_task(f)
                         file_details.append(f"{f.name}(scope={scope},exec={is_exec})")
-                    if len(all_md) > 5:
-                        file_details.append(f"...共{len(all_md)}个文件")
+                    if len(all_files) > 5:
+                        file_details.append(f"...共{len(all_files)}个文件")
                     info_parts.append(f"文件列表: {', '.join(file_details)}")
                 
                 if executable:
@@ -177,9 +177,9 @@ def _get_trigger_debug_info(config: AgentConfig) -> str:
                         for f in non_executable[:3]:
                             scope = _get_task_execution_scope(f)
                             non_exec_details.append(f"{f.name}(scope={scope})")
-                        info_parts.append(f"→ 未触发: input目录有 {len(all_md)} 个文件但无可执行文件 | 非可执行: {', '.join(non_exec_details)}")
+                        info_parts.append(f"→ 未触发: input目录有 {len(all_files)} 个文件但无可执行文件 | 非可执行: {', '.join(non_exec_details)}")
                     else:
-                        info_parts.append(f"→ 未触发: input目录有 {len(all_md)} 个文件但无可执行文件")
+                        info_parts.append(f"→ 未触发: input目录有 {len(all_files)} 个文件但无可执行文件")
             else:
                 info_parts.append("→ 未触发: 条件满足但未找到可执行文件")
         else:
@@ -218,9 +218,9 @@ def _get_trigger_check_details(config: AgentConfig) -> str:
             details.append(f"{dir_name}: 目录不存在")
             continue
         
-        md_files = list(watch_dir.glob("*.md"))
-        all_count = len(md_files)
-        executable = [f for f in md_files if _is_executable_task(f)]
+        all_task_files = [f for f in watch_dir.iterdir() if f.is_file()]
+        all_count = len(all_task_files)
+        executable = [f for f in all_task_files if _is_executable_task(f)]
         exec_count = len(executable)
         
         if trigger.condition == TriggerCondition.HAS_FILES:
@@ -301,8 +301,8 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
             # IS_EMPTY: 目录不存在视为空，满足条件
             continue
         
-        md_files = list(watch_dir.glob("*.md"))
-        has_files = len(md_files) > 0
+        dir_files = [f for f in watch_dir.iterdir() if f.is_file()]
+        has_files = len(dir_files) > 0
         
         if trigger.condition == TriggerCondition.HAS_FILES:
             if not has_files:
@@ -322,7 +322,10 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
         # 优先处理processing目录（如果存在且use_ongoing=True）
         if config.use_ongoing and config.processing_dir.exists() and config.processing_dir in trigger.watch_dirs:
             candidates = [
-                f for f in sorted(config.processing_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
+                f for f in sorted(
+                    (f for f in config.processing_dir.iterdir() if f.is_file()),
+                    key=lambda p: p.stat().st_mtime,
+                )
                 if _is_executable_task(f)
             ]
             if candidates:
@@ -330,8 +333,8 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
 
         # 从input目录取文件
         if config.input_dir in trigger.watch_dirs and config.input_dir.exists():
-            all_md = list(config.input_dir.glob("*.md"))
-            executable = [p for p in all_md if _is_executable_task(p)]
+            all_files = [f for f in config.input_dir.iterdir() if f.is_file()]
+            executable = [p for p in all_files if _is_executable_task(p)]
             
             if executable:
                 # 按修改时间排序，返回最早的文件
@@ -343,8 +346,8 @@ def _unified_trigger(config: AgentConfig) -> list[Path]:
             if watch_dir == config.input_dir or watch_dir == config.processing_dir:
                 continue
             if watch_dir.exists():
-                all_md = list(watch_dir.glob("*.md"))
-                executable = [p for p in all_md if _is_executable_task(p)]
+                all_files = [f for f in watch_dir.iterdir() if f.is_file()]
+                executable = [p for p in all_files if _is_executable_task(p)]
                 if executable:
                     result.extend(executable)
         if result:
@@ -371,6 +374,113 @@ def _get_agent_type(config: AgentConfig):
     except Exception:
         pass
     return resolve_agent_type(config.name)
+
+
+def _process_chat_request(config: AgentConfig, verbose: bool = True) -> None:
+    """
+    处理来自 dashboard 的 chat 请求。
+    读取 chat_request.json，执行 chat，写入 chat_response.json，然后删除请求文件。
+    """
+    import json
+    from secretary.agents import load_agent_session_id, save_agent_session_id
+    from secretary.agent_runner import run_agent
+    from secretary.settings import get_model
+    from datetime import datetime as _dt
+    
+    chat_request_file = config.base_dir / "chat_request.json"
+    chat_response_file = config.base_dir / "chat_response.json"
+    
+    if not chat_request_file.exists():
+        return
+    
+    try:
+        # 读取请求
+        req_data = json.loads(chat_request_file.read_text(encoding="utf-8"))
+        message = req_data.get("message", "").strip()
+        if not message:
+            response = {"ok": False, "error": "empty message", "output": ""}
+        else:
+            ts = datetime.now().strftime("%H:%M:%S")
+            if verbose:
+                print(f"[{ts}] 💬 处理 chat 请求: {message[:60]}...")
+            
+            session_id = load_agent_session_id(config.name)
+            
+            # 确保 dialog 文件存在
+            dialog_dir = config.dialog_dir if config.dialog_dir else config.base_dir / "dialog"
+            dialog_dir.mkdir(parents=True, exist_ok=True)
+            dialog_file = dialog_dir / "dialog.md"
+            
+            # 写入用户消息到 dialog
+            ts_str = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(dialog_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{'─'*60}\n[{ts_str}] 用户 (web)\n{'─'*60}\n")
+                f.write(message + "\n")
+            
+            # 执行 chat
+            try:
+                result = run_agent(
+                    prompt=message,
+                    workspace=str(cfg.get_workspace()),
+                    model=get_model(),
+                    verbose=False,
+                    session_id=session_id,
+                    dialog_file=dialog_file,
+                )
+                if result.stats.session_id:
+                    save_agent_session_id(config.name, result.stats.session_id)
+                
+                response = {
+                    "ok": result.success,
+                    "output": result.output,
+                    "session_id": result.stats.session_id,
+                }
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                traceback_str = traceback.format_exc()
+                if verbose:
+                    print(f"[{ts}] ❌ Chat 执行失败: {error_msg}")
+                response = {
+                    "ok": False,
+                    "error": error_msg,
+                    "traceback": traceback_str,
+                    "output": "",
+                }
+        
+        # 写入响应
+        chat_response_file.write_text(
+            json.dumps(response, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        
+        # 删除请求文件（表示已处理）
+        chat_request_file.unlink()
+        
+        if verbose:
+            ts = datetime.now().strftime("%H:%M:%S")
+            status = "✅" if response.get("ok") else "❌"
+            print(f"[{ts}] {status} Chat 完成")
+            
+    except Exception as e:
+        import traceback
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] ❌ 处理 chat 请求异常: {e}")
+        traceback.print_exc()
+        # 写入错误响应
+        try:
+            chat_response_file.write_text(
+                json.dumps({
+                    "ok": False,
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                    "output": "",
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            chat_request_file.unlink()
+        except:
+            pass
 
 
 def _process_one_unified(config: AgentConfig, file_path: Path, verbose: bool) -> None:
@@ -477,6 +587,23 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
     TRIGGER_LOG_INTERVAL = 30  # 每 30 秒输出一次
 
     def trigger_fn():
+        # 优先检查 chat 请求（阻塞正常扫描，优先处理 chat）
+        chat_request_file = config.base_dir / "chat_request.json"
+        if chat_request_file.exists():
+            try:
+                import json
+                req_data = json.loads(chat_request_file.read_text(encoding="utf-8"))
+                # 返回一个特殊的"chat任务"标记，process_fn 会识别并处理
+                return [Path("__CHAT_REQUEST__")]
+            except Exception as e:
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(f"[{ts}] ⚠️ 读取 chat 请求失败: {e}")
+                # 删除损坏的请求文件
+                try:
+                    chat_request_file.unlink()
+                except:
+                    pass
+        
         try:
             result = _unified_trigger(config)
             
@@ -500,6 +627,12 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
 
     def process_fn(file_path: Path):
         from secretary.agents import set_agent_executing, increment_completed_tasks
+        
+        # 检查是否是 chat 请求
+        if str(file_path) == "__CHAT_REQUEST__":
+            _process_chat_request(config, verbose)
+            return
+        
         set_agent_executing(config.name, True)
         increment_completed_tasks(config.name)
 

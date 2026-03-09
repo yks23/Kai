@@ -34,24 +34,31 @@ def build_first_round_prompt(task_file: Path, report_dir: Path | None = None,
     effective_report_dir = report_dir or (BASE_DIR / "agents" / "unknown" / "reports")
 
     template = load_prompt("worker_first.md")
+    from secretary.agents import build_skills_section
     return template.format(
         base_dir=BASE_DIR,
         task_file=task_file,
         report_dir=effective_report_dir,
         report_filename=report_filename,
         known_agents_section=build_known_agents_section(agent_name or ""),
+        skills_section=build_skills_section(agent_name or "", BASE_DIR),
     )
 
 
 def build_continue_prompt(task_file: Path, report_dir: Path | None = None,
                            agent_name: str | None = None) -> str:
-    """续轮提示词 — 简短指令"""
-    from secretary.agents import _worker_reports_dir
+    """续轮提示词 — 简短指令；仅当 known_agents 发生变化时才重新发送"""
+    from secretary.agents import _worker_reports_dir, build_known_agents_section, known_agents_changed
     if report_dir is None and agent_name:
         report_dir = _worker_reports_dir(agent_name)
     effective_report_dir = report_dir or (BASE_DIR / "agents" / "unknown" / "reports")
+    ka_section = build_known_agents_section(agent_name or "") if (agent_name and known_agents_changed(agent_name)) else ""
     template = load_prompt("worker_continue.md")
-    return template.format(task_file=task_file, report_dir=effective_report_dir)
+    return template.format(
+        task_file=task_file,
+        report_dir=effective_report_dir,
+        known_agents_section=ka_section,
+    )
 
 
 def build_refine_prompt(elapsed_sec: float, min_time: int,

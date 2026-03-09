@@ -34,6 +34,19 @@ if _agents_py_path.exists():
         stop_all_agents = _agents_registry.stop_all_agents
         save_agent_session_id = _agents_registry.save_agent_session_id
         load_agent_session_id = _agents_registry.load_agent_session_id
+        # graph / known-agents API
+        get_agent_known_agents   = _agents_registry.get_agent_known_agents
+        set_agent_known_agents   = _agents_registry.set_agent_known_agents
+        add_known_agent_link     = _agents_registry.add_known_agent_link
+        remove_known_agent_link  = _agents_registry.remove_known_agent_link
+        get_graph_data           = _agents_registry.get_graph_data
+        known_agents_changed     = _agents_registry.known_agents_changed
+        save_known_agents_snapshot = _agents_registry.save_known_agents_snapshot
+        # custom types
+        list_custom_types        = _agents_registry.list_custom_types
+        get_custom_type          = _agents_registry.get_custom_type
+        register_custom_type     = _agents_registry.register_custom_type
+        delete_custom_type       = _agents_registry.delete_custom_type
     else:
         raise ImportError(f"Cannot load agents.py from {_agents_py_path}")
 else:
@@ -70,6 +83,17 @@ __all__ = [
     "stop_all_agents",
     "save_agent_session_id",
     "load_agent_session_id",
+    "get_agent_known_agents",
+    "set_agent_known_agents",
+    "add_known_agent_link",
+    "remove_known_agent_link",
+    "get_graph_data",
+    "known_agents_changed",
+    "save_known_agents_snapshot",
+    "list_custom_types",
+    "get_custom_type",
+    "register_custom_type",
+    "delete_custom_type",
     # Paths
     "_worker_dir",
     "_worker_tasks_dir",

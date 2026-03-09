@@ -240,6 +240,118 @@ class AgentTypeRegistry:
                 print(f"✅ 发现 {len(discovered)} 个自定义 agent 类型: {', '.join(discovered)}")
 
 
+# ─────────────────────────────────────────────────────────────
+#  CustomAgentType — 从 agents.json 存储的自定义类型动态创建
+# ─────────────────────────────────────────────────────────────
+
+class CustomAgentType(AgentType):
+    """
+    用户自定义 agent 类型。
+
+    目录结构和触发规则继承自 base_type (worker/secretary/boss/recycler)，
+    提示词使用用户上传的 markdown 内容。
+    """
+
+    def __init__(self, type_info: dict):
+        self._type_info = type_info
+        self._name = type_info["name"]
+        self._base_type_name = type_info.get("base_type", "worker")
+        self._first_prompt_tpl = type_info.get("first_prompt", "")
+        self._continue_prompt_tpl = type_info.get("continue_prompt", "")
+        self._description = type_info.get("description", "")
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def label_template(self) -> str:
+        return "🔧 {name}"
+
+    @property
+    def prompt_template(self) -> str:
+        return ""  # Not used — prompts come from stored content
+
+    def _base_agent_type(self) -> AgentType:
+        base = _registry.get(self._base_type_name)
+        if not base:
+            # Lazy-init if registry hasn't been loaded yet
+            _registry._load_builtin_types()
+            base = _registry.get(self._base_type_name) or _registry.get("worker")
+        return base  # type: ignore
+
+    def build_config(self, base_dir: Path, agent_name: str) -> "AgentConfig":
+        """委托给 base_type 构建相同的目录结构 / 触发配置"""
+        return self._base_agent_type().build_config(base_dir, agent_name)
+
+    # ── 提示词构建 ──
+
+    def _build_first(self, task_file: Path, config: "AgentConfig") -> str:
+        from secretary.agents import build_known_agents_section
+        tpl = self._first_prompt_tpl
+        # 支持模板变量 — 与内置类型一致
+        mapping = {
+            "base_dir": str(config.base_dir.parent.parent if config.base_dir else ""),
+            "task_file": str(task_file),
+            "report_dir": str(config.output_dir) if config.output_dir else "",
+            "report_filename": task_file.stem + "-report.md",
+            "known_agents_section": build_known_agents_section(config.name),
+        }
+        try:
+            return tpl.format_map(mapping)
+        except (KeyError, IndexError):
+            return tpl  # 如果模板变量不匹配，返回原始内容
+
+    def _build_continue(self, task_file: Path, config: "AgentConfig") -> str:
+        from secretary.agents import build_known_agents_section, known_agents_changed
+        ka = build_known_agents_section(config.name) if known_agents_changed(config.name) else ""
+        tpl = self._continue_prompt_tpl
+        mapping = {
+            "task_file": str(task_file),
+            "report_dir": str(config.output_dir) if config.output_dir else "",
+            "known_agents_section": ka,
+        }
+        try:
+            return tpl.format_map(mapping)
+        except (KeyError, IndexError):
+            return tpl
+
+    def process_task(self, config: "AgentConfig", task_file: Path, verbose: bool = True) -> None:
+        from datetime import datetime as _dt
+        from secretary.agent_types.base import prepare_dialog_file, run_agent_with_session
+
+        ts = _dt.now().strftime("%H:%M:%S")
+        print(f"\n[{ts}] ▶ {task_file.name} ({config.name}) [custom:{self._name}]")
+
+        dialog_file = prepare_dialog_file(config, task_file.stem)
+        first = self._build_first(task_file, config)
+        cont = self._build_continue(task_file, config)
+        try:
+            result = run_agent_with_session(
+                config.name, first, cont,
+                dialog_file=dialog_file, verbose=verbose,
+            )
+            ts = _dt.now().strftime("%H:%M:%S")
+            status = "✅" if result.success else "❌"
+            print(f"[{ts}] {status} {task_file.name} 完成 ({result.duration:.1f}s)")
+        except Exception as e:
+            import traceback
+            ts = _dt.now().strftime("%H:%M:%S")
+            print(f"\n[{ts}] ❌ {task_file.name}: {e}")
+            traceback.print_exc()
+
+
+def _load_custom_types_from_registry():
+    """从 agents.json 的 custom_types 段加载并注册所有自定义类型"""
+    try:
+        from secretary.agents import list_custom_types
+        for ct in list_custom_types():
+            instance = CustomAgentType(ct)
+            _registry.register(ct["name"], instance)
+    except Exception:
+        pass
+
+
 # 全局注册表实例
 _registry = AgentTypeRegistry
 
@@ -267,6 +379,8 @@ def has_agent_type(type_name: str) -> bool:
 def initialize_registry(custom_agents_dir: Optional[Path] = None) -> None:
     """初始化注册表"""
     _registry.initialize(custom_agents_dir)
+    # 也加载 agents.json 中存储的自定义类型
+    _load_custom_types_from_registry()
 
 
 def resolve_agent_type(agent_name: str) -> AgentType:
@@ -275,16 +389,24 @@ def resolve_agent_type(agent_name: str) -> AgentType:
 
     查找顺序：
       1. 从 agents.json 注册信息中获取 type 字段 → 注册表查找
-      2. 回退到 "worker" 类型
-      3. 都失败则抛出 ValueError
+      2. 如果是自定义类型但未加载，动态加载
+      3. 回退到 "worker" 类型
+      4. 都失败则抛出 ValueError
     """
-    from secretary.agents import get_worker
+    from secretary.agents import get_worker, get_custom_type
 
     worker_info = get_worker(agent_name)
     if worker_info and worker_info.get("type"):
-        agent_type = _registry.get(worker_info["type"])
+        type_name = worker_info["type"]
+        agent_type = _registry.get(type_name)
         if agent_type:
             return agent_type
+        # 尝试动态加载自定义类型
+        ct = get_custom_type(type_name)
+        if ct:
+            instance = CustomAgentType(ct)
+            _registry.register(type_name, instance)
+            return instance
 
     default = _registry.get("worker")
     if default:

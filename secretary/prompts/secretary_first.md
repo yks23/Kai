@@ -13,6 +13,8 @@
 
 {known_agents_section}
 
+{skills_section}
+
 # 工作流程
 1. 读取 `{task_file}`，分析请求内容
 2. **任务拆解（可选）**: 可拆解为多个独立子任务，分配给不同 worker 并行处理

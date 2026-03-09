@@ -953,6 +953,16 @@ def cmd_recycle(args):
     _start_agent_scanner(recycler_name, "recycler", silent=False)
 
 
+def cmd_dashboard(args):
+    """启动 Web 仪表板，在浏览器中打开。"""
+    if not _is_workspace_configured(args):
+        print(f"💡 工作区未设置，使用当前目录")
+    from secretary.ui.web_dashboard import run_dashboard
+    port = getattr(args, "port", 12345)
+    open_browser = not getattr(args, "no_browser", False)
+    run_dashboard(port=port, open_browser=open_browser)
+
+
 def cmd_monitor(args):
     """实时监控面板（TUI，q 退出）。--text/--once 输出文本快照。"""
     if not _is_workspace_configured(args):
@@ -2607,6 +2617,11 @@ Agent管理 (hire 统一入口):
     subparsers.add_parser("clean-logs", help="🧹 清理 logs/ 下的日志文件")
     subparsers.add_parser("clean-processes", help="🧹 清理泄露的 worker 进程记录")
 
+    # ---- dashboard ----
+    p = subparsers.add_parser("dashboard", help="🌐 打开 Web 仪表板 (localhost:12345)")
+    p.add_argument("--port", type=int, default=12345, help="监听端口 (默认 12345)")
+    p.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+
     # ---- upgrade ----
     subparsers.add_parser("upgrade", help="🔄 从远端拉取最新代码并重新安装")
 
@@ -2626,6 +2641,7 @@ Agent管理 (hire 统一入口):
         "chat": cmd_chat,
         "clean-logs": cmd_clean_logs,
         "clean-processes": cmd_clean_processes,
+        "dashboard": cmd_dashboard,
         "upgrade": cmd_upgrade,
         "base": cmd_base,
         "name": cmd_name,
