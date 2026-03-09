@@ -1948,6 +1948,74 @@ def cmd_model(args):
     print(f"   ✅ 已保存，后续任务将使用 {new_model} 模型")
 
 
+def cmd_learn_stream(args):
+    """网络学堂输入流：同步作业与课件到指定目录。"""
+    from secretary.input_streams import LearnStreamError, run_learn_stream
+
+    cookie = (getattr(args, "cookie", None) or "").strip()
+    cookie_file = (getattr(args, "cookie_file", None) or "").strip()
+    if not cookie and cookie_file:
+        try:
+            cookie = Path(cookie_file).expanduser().read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"❌ 读取 cookie 文件失败: {e}")
+            return
+    if not cookie:
+        cookie = os.environ.get("LEARN_COOKIE", "").strip()
+
+    csrf_token = (getattr(args, "csrf", None) or "").strip()
+    if not csrf_token:
+        csrf_token = os.environ.get("LEARN_CSRF", "").strip()
+
+    if not cookie:
+        print("❌ 缺少登录 Cookie")
+        print("   传参: --cookie 'name=value; ...' 或 --cookie-file /path/to/cookie.txt")
+        print("   或环境变量: LEARN_COOKIE")
+        return
+    if not csrf_token:
+        print("❌ 缺少 CSRF Token")
+        print("   传参: --csrf <token> 或环境变量: LEARN_CSRF")
+        return
+
+    mode = getattr(args, "only", "all")
+    include_files = mode in ("all", "files")
+    include_homework = mode in ("all", "homework")
+
+    try:
+        result = run_learn_stream(
+            cookie=cookie,
+            csrf_token=csrf_token,
+            output_dir=args.output,
+            semester_id=args.semester,
+            include_files=include_files,
+            include_homework=include_homework,
+            download_homework_attachments=getattr(args, "homework_attachments", True),
+            dry_run=getattr(args, "dry_run", False),
+            lang=args.lang,
+            base_url=args.base_url,
+            timeout=args.timeout,
+        )
+    except LearnStreamError as e:
+        print(f"❌ 输入流执行失败: {e}")
+        return
+    except Exception as e:
+        print(f"❌ 输入流异常: {e}")
+        return
+
+    stats = result.get("stats", {})
+    print("\n✅ 网络学堂输入流执行完成")
+    print(f"   输出目录: {Path(args.output).expanduser().resolve()}")
+    print(f"   学期: {result.get('semester_id')}")
+    print(f"   课程: {stats.get('courses_processed', 0)}")
+    print(f"   课件: {stats.get('courseware_downloaded', 0)}/{stats.get('courseware_items', 0)}")
+    print(
+        "   作业附件: "
+        f"{stats.get('homework_attachments_downloaded', 0)}/{stats.get('homework_attachments', 0)}"
+    )
+    print(f"   错误: {stats.get('errors', 0)}")
+    print("   清单: learn_stream_manifest.json")
+
+
 # ============================================================
 #  report 命令
 # ============================================================
@@ -2188,6 +2256,21 @@ def cmd_help(args):
   {name} model Auto
   {name} model gpt-4
 """,
+            "learn-stream": f"""
+🌐 网络学堂输入流（同步作业/课件）
+
+用法:
+  {name} learn-stream --output <目录> --cookie "<cookie>" --csrf <token>
+
+常用参数:
+  --semester <学期ID>         指定学期，不传则自动取当前学期
+  --only all|files|homework   只同步课件或作业
+  --dry-run                   仅抓索引，不下载文件
+  --cookie-file <文件路径>     从文件读取整段 Cookie
+
+说明:
+  需要有效登录 Cookie 和 CSRF Token，可通过参数或环境变量 LEARN_COOKIE / LEARN_CSRF 提供。
+""",
             "target": f"""
 🎯 创建 Boss (快捷方式)
 
@@ -2224,6 +2307,7 @@ def _print_command_list(name: str):
     commands = [
         ("📝 任务", [
             ("task", "提交任务（写入 agent 的 tasks/ 目录）"),
+            ("learn-stream", "同步网络学堂作业/课件到本地目录"),
         ]),
         ("👷 Agent管理 (hire 统一入口)", [
             ("hire", "招募 agent: hire <name> <type> [dep_agent ...]"),
@@ -2369,7 +2453,7 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             continue
 
         # base / name / model / help 不需要 ensure_dirs
-        if args.command in ("base", "name", "model", "help", "upgrade"):
+        if args.command in ("base", "name", "model", "help", "upgrade", "learn-stream"):
             handlers[args.command](args)
             continue
 
@@ -2601,6 +2685,38 @@ Agent管理 (hire 统一入口):
     p.add_argument("--no-start", action="store_true",
                    help="仅创建目录和配置，不启动扫描器")
 
+    # ---- learn-stream ----
+    p = subparsers.add_parser(
+        "learn-stream",
+        help="🌐 同步网络学堂作业与课件到本地目录",
+        description=(
+            "从清华网络学堂拉取作业与课件，写入本地目录。\n"
+            "需要已登录 Cookie + CSRF Token。"
+        ),
+    )
+    p.add_argument("--output", required=True, help="输出目录")
+    p.add_argument("--cookie", type=str, default=None, help="登录 Cookie（整段 header 值）")
+    p.add_argument("--cookie-file", type=str, default=None, help="从文件读取 Cookie（优先于环境变量）")
+    p.add_argument("--csrf", type=str, default=None, help="CSRF Token")
+    p.add_argument("--semester", type=str, default=None, help="学期 ID（不传则自动取当前学期）")
+    p.add_argument("--lang", type=str, default="zh", choices=["zh", "en"], help="课程接口语言，默认 zh")
+    p.add_argument(
+        "--only",
+        type=str,
+        default="all",
+        choices=["all", "files", "homework"],
+        help="同步范围：all/files/homework",
+    )
+    p.add_argument("--base-url", type=str, default="https://learn.tsinghua.edu.cn", help="网络学堂基地址")
+    p.add_argument("--timeout", type=float, default=20.0, help="HTTP 超时时间（秒）")
+    p.add_argument("--dry-run", action="store_true", help="只抓取索引，不下载文件")
+    p.add_argument(
+        "--no-homework-attachments",
+        action="store_false",
+        dest="homework_attachments",
+        help="不解析并下载作业详情页附件",
+    )
+
     # ---- report ----
     # ---- help ----
     p = subparsers.add_parser("help", help="❓ 显示帮助信息")
@@ -2646,6 +2762,7 @@ Agent管理 (hire 统一入口):
         "base": cmd_base,
         "name": cmd_name,
         "model": cmd_model,
+        "learn-stream": cmd_learn_stream,
         "target": cmd_target,
         "help": cmd_help,
     }
@@ -2680,7 +2797,7 @@ Agent管理 (hire 统一入口):
         pass  # 如果初始化失败，不影响其他功能
 
     # base / name / model / help 命令不需要 ensure_dirs
-    if args.command in ("base", "name", "model", "help", "upgrade"):
+    if args.command in ("base", "name", "model", "help", "upgrade", "learn-stream"):
         handlers[args.command](args)
         return
 
