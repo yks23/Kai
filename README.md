@@ -197,6 +197,8 @@ kai start sen --once
 |----------|------|------|
 | 任务     | `kai task "描述"` | 提交任务，经秘书 Agent 归类并分配；`-q` 安静模式；`--time N` 最低执行时间(秒)；`--worker NAME` 直接指定工人。 |
 | 输入流   | `kai learn-stream --output ./out --cookie "<cookie>" --csrf <token>` | 从清华网络学堂同步课件与作业（支持 `--only files/homework`、`--dry-run`）。 |
+| 输入流   | `kai learn-stream-setup` | 交互式配置网络学堂输入流（输出目录、Cookie/CSRF、范围、定时参数）。 |
+| 输入流   | `kai learn-stream-schedule start/stop/status/run-once` | 管理网络学堂定时拉取（后台循环执行）。 |
 | 任务     | `kai keep "持续目标"` | 持续监控模式：队列空时自动生成新任务推进目标；可加 `--worker NAME`。 |
 | 技能     | `kai skills` | 列出所有已学技能（内置 + 自定义）。 |
 | 技能     | `kai learn "描述" skill-name` | 学习新技能。 |
