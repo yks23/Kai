@@ -11,6 +11,7 @@ requires-python = ">=3.9"
 license = {text = "MIT"}
 dependencies = [
     "rich>=13.0",
+    "browser-cookie3",
 ]
 
 [project.scripts]

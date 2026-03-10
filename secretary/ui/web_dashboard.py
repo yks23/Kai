@@ -24,6 +24,7 @@ Endpoints
   GET  /api/learn-stream/status       → JSON: scheduler status + last run
   GET  /api/learn-stream/log          → JSON: scheduler log tail
   GET  /api/learn-stream/workflow-json → JSON: e2e-HW-machine workflow spec
+  POST /api/learn-stream/import-browser-auth → auto import cookie/csrf from browser
   POST /api/learn-stream/run-once     → run one pull immediately
   POST /api/learn-stream/start        → start scheduler loop
   POST /api/learn-stream/stop         → stop scheduler loop
@@ -72,6 +73,7 @@ from secretary.input_streams.scheduler import (
     start_scheduler as learn_start_scheduler,
     stop_scheduler as learn_stop_scheduler,
 )
+from secretary.input_streams.browser_auth import import_learn_auth_from_browser
 from secretary.machine.workflow import (
     build_machine_workflow_json,
     get_machine_workflow_status,
@@ -484,6 +486,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._post_link(add=True)
             elif p == "/api/learn-stream/config":
                 self._post_learn_stream_config()
+            elif p == "/api/learn-stream/import-browser-auth":
+                self._post_learn_stream_import_browser_auth()
             elif p == "/api/learn-stream/run-once":
                 self._post_learn_stream_run_once()
             elif p == "/api/learn-stream/start":
@@ -851,6 +855,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "config_path": str(saved),
             "config": config,
         })
+
+    def _post_learn_stream_import_browser_auth(self):
+        body = self._read_json()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "invalid json body"}, 400)
+            return
+        browser = str(body.get("browser") or "auto").strip().lower()
+        open_login = bool(body.get("open_login", False))
+        base_url = str(body.get("base_url") or "https://learn.tsinghua.edu.cn").strip()
+        config_path = body.get("config_path")
+        try:
+            result = import_learn_auth_from_browser(
+                config_path=config_path,
+                browser=browser or "auto",
+                open_login=open_login,
+                base_url=base_url or "https://learn.tsinghua.edu.cn",
+            )
+        except Exception as exc:
+            _slog.error(f"learn-stream browser auth import failed: {exc}", exc)
+            self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        self._json({"ok": True, "result": result})
 
     def _post_learn_stream_run_once(self):
         body = self._read_json()
