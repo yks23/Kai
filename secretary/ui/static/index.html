@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Kai Dashboard</title>
+<title>machine Dashboard</title>
 <style>
 /* ── Reset & Tokens ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -469,7 +469,7 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
   <div id="learn-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2000;align-items:center;justify-content:center;">
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 20px;width:560px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.5);">
       <div style="display:flex;align-items:center;margin-bottom:14px;">
-        <span style="font-size:15px;font-weight:700;flex:1;color:var(--text)">🎓 网络学堂连接配置</span>
+        <span style="font-size:15px;font-weight:700;flex:1;color:var(--text)">🎓 网络学堂 + machine 工作流</span>
         <button onclick="closeLearnOverlay()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:0 4px;">✕</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;">
@@ -479,7 +479,7 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
         </div>
         <div>
           <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Cookie 文件</label>
-          <input id="ls-cookie-file" placeholder="~/.config/kai/learn.cookie" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          <input id="ls-cookie-file" placeholder="~/.config/machine/learn.cookie" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
         </div>
         <div>
           <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">CSRF Token</label>
@@ -532,17 +532,80 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
         </label>
       </div>
 
+      <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border);">
+        <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:8px;">e2e-HW-machine（单入口/单出口）</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;">
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">启用 machine 流程</label>
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;padding-top:4px;">
+              <input type="checkbox" id="ls-machine-enabled" style="accent-color:var(--green);cursor:pointer" />
+              <span style="font-size:12px;color:var(--text)">拉取后自动派发作业</span>
+            </label>
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">求解 Agent</label>
+            <input id="ls-machine-agent" placeholder="例如: yks / worker1" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div style="grid-column:1 / span 2;">
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">作业输出目录</label>
+            <input id="ls-machine-output" placeholder="/workspace/machine_homework_output" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">求解超时（分钟）</label>
+            <input id="ls-machine-timeout" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">邮件通知</label>
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;padding-top:4px;">
+              <input type="checkbox" id="ls-machine-email-enabled" style="accent-color:var(--green);cursor:pointer" />
+              <span style="font-size:12px;color:var(--text)">完成后发邮件</span>
+            </label>
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">SMTP Host</label>
+            <input id="ls-machine-smtp-host" placeholder="smtp.example.com" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">SMTP Port</label>
+            <input id="ls-machine-smtp-port" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">SMTP User</label>
+            <input id="ls-machine-smtp-user" placeholder="user@example.com" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">SMTP Password</label>
+            <input id="ls-machine-smtp-password" type="password" placeholder="建议留空并改用 MACHINE_SMTP_PASSWORD" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">发件人</label>
+            <input id="ls-machine-email-from" placeholder="noreply@example.com" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">收件人（逗号分隔）</label>
+            <input id="ls-machine-email-to" placeholder="a@x.com,b@y.com" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+          <div style="grid-column:1 / span 2;">
+            <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">邮件标题模板</label>
+            <input id="ls-machine-email-subject" placeholder="[machine] 作业完成通知 ({count})" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+          </div>
+        </div>
+      </div>
+
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
         <button onclick="saveLearnConfig()" style="padding:7px 12px;background:var(--accent);border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">保存配置</button>
         <button onclick="learnRunOnce()" style="padding:7px 12px;background:#1f6feb;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">单次拉取</button>
         <button onclick="learnStartSchedule()" style="padding:7px 12px;background:#2f8f46;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">启动定时</button>
         <button onclick="learnStopSchedule()" style="padding:7px 12px;background:#8b2d2d;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">停止定时</button>
         <button onclick="refreshLearnStatus()" style="padding:7px 12px;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">刷新状态</button>
+        <button onclick="loadMachineWorkflowJson()" style="padding:7px 12px;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">工作流 JSON</button>
       </div>
       <div id="ls-msg" style="margin-top:8px;font-size:12px;min-height:16px;color:var(--muted);"></div>
       <pre id="ls-status" style="margin-top:10px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;"></pre>
       <div style="margin-top:8px;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.03em;">调度日志（末尾）</div>
       <pre id="ls-log" style="margin-top:6px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:#abb2bf;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto;"></pre>
+      <div style="margin-top:8px;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.03em;">machine 工作流 JSON（单入口/单出口）</div>
+      <pre id="ls-workflow-json" style="margin-top:6px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:#abb2bf;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;"></pre>
     </div>
   </div>
 
@@ -551,7 +614,7 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
     <div class="sidebar-header">
       <span class="logo">⚡</span>
       <div>
-        <div class="title">Kai</div>
+        <div class="title">machine</div>
         <div class="ws-badge" id="ws-badge">loading…</div>
       </div>
       <button onclick="openHireOverlay()" title="添加 Agent"
@@ -1385,6 +1448,7 @@ async function openLearnOverlay() {
   ov.style.display = 'flex';
   await loadLearnConfig();
   await refreshLearnStatus();
+  await loadMachineWorkflowJson();
 }
 
 function closeLearnOverlay() {
@@ -1407,6 +1471,18 @@ async function loadLearnConfig() {
     _lsSetValue('ls-interval', String(c.schedule_interval_minutes ?? 360));
     _lsSetChecked('ls-dry-run', !!c.dry_run);
     _lsSetChecked('ls-homework-attachments', !!c.homework_attachments);
+    _lsSetChecked('ls-machine-enabled', !!c.machine_enabled);
+    _lsSetValue('ls-machine-agent', c.machine_solver_agent || '');
+    _lsSetValue('ls-machine-output', c.machine_output_dir || '');
+    _lsSetValue('ls-machine-timeout', String(c.machine_solver_timeout_minutes ?? 120));
+    _lsSetChecked('ls-machine-email-enabled', !!c.machine_email_enabled);
+    _lsSetValue('ls-machine-smtp-host', c.machine_smtp_host || '');
+    _lsSetValue('ls-machine-smtp-port', String(c.machine_smtp_port ?? 587));
+    _lsSetValue('ls-machine-smtp-user', c.machine_smtp_user || '');
+    _lsSetValue('ls-machine-smtp-password', c.machine_smtp_password || '');
+    _lsSetValue('ls-machine-email-from', c.machine_email_from || '');
+    _lsSetValue('ls-machine-email-to', c.machine_email_to || '');
+    _lsSetValue('ls-machine-email-subject', c.machine_email_subject_template || '[machine] 作业完成通知 ({count})');
     _lsMsg(`配置已加载: ${data.config_path || ''}`);
   } catch (e) {
     _lsMsg(`加载配置失败: ${e.message || e}`, 'var(--red)');
@@ -1424,6 +1500,16 @@ async function saveLearnConfig() {
     _lsMsg('超时必须是大于 0 的数字', 'var(--red)');
     return;
   }
+  const machineTimeout = parseInt(_lsGetValue('ls-machine-timeout') || '0', 10);
+  const smtpPort = parseInt(_lsGetValue('ls-machine-smtp-port') || '0', 10);
+  if (!Number.isFinite(machineTimeout) || machineTimeout <= 0) {
+    _lsMsg('machine 求解超时必须是大于 0 的整数', 'var(--red)');
+    return;
+  }
+  if (!Number.isFinite(smtpPort) || smtpPort <= 0) {
+    _lsMsg('SMTP 端口必须是大于 0 的整数', 'var(--red)');
+    return;
+  }
 
   const config = {
     output_dir: _lsGetValue('ls-output'),
@@ -1437,6 +1523,18 @@ async function saveLearnConfig() {
     dry_run: _lsGetChecked('ls-dry-run'),
     homework_attachments: _lsGetChecked('ls-homework-attachments'),
     schedule_interval_minutes: interval,
+    machine_enabled: _lsGetChecked('ls-machine-enabled'),
+    machine_solver_agent: _lsGetValue('ls-machine-agent'),
+    machine_output_dir: _lsGetValue('ls-machine-output'),
+    machine_solver_timeout_minutes: machineTimeout,
+    machine_email_enabled: _lsGetChecked('ls-machine-email-enabled'),
+    machine_smtp_host: _lsGetValue('ls-machine-smtp-host'),
+    machine_smtp_port: smtpPort,
+    machine_smtp_user: _lsGetValue('ls-machine-smtp-user'),
+    machine_smtp_password: _lsGetValue('ls-machine-smtp-password'),
+    machine_email_from: _lsGetValue('ls-machine-email-from'),
+    machine_email_to: _lsGetValue('ls-machine-email-to'),
+    machine_email_subject_template: _lsGetValue('ls-machine-email-subject') || '[machine] 作业完成通知 ({count})',
   };
   try {
     const data = await api('/api/learn-stream/config', {
@@ -1521,8 +1619,10 @@ async function refreshLearnStatus() {
   try {
     const data = await api('/api/learn-stream/status');
     const st = data.status || {};
+    const machine = data.machine || {};
     const lr = st.last_run || {};
     const stats = lr.stats || {};
+    const mstats = lr.machine || {};
     const lines = [
       `运行中: ${st.running ? '是' : '否'}`,
       `PID: ${st.pid || '-'}`,
@@ -1532,6 +1632,8 @@ async function refreshLearnStatus() {
       `最近执行: ${lr.timestamp || '-'}`,
       `最近成功: ${lr.success === undefined ? '-' : String(lr.success)}`,
       `最近统计: 课程=${stats.courses_processed || 0}, 课件=${stats.courseware_downloaded || 0}/${stats.courseware_items || 0}, 作业附件=${stats.homework_attachments_downloaded || 0}/${stats.homework_attachments || 0}, 错误=${stats.errors || 0}`,
+      `machine 最近: new=${mstats.new_jobs_submitted || 0}, completed=${mstats.completed_jobs || 0}, pending=${mstats.pending_jobs || 0}, timeout=${mstats.timeout_jobs || 0}`,
+      `machine 状态: total=${machine.job_total || 0}, submitted=${machine.job_submitted || 0}, completed=${machine.job_completed || 0}, timeout=${machine.job_timeout || 0}`,
       `日志路径: ${data.log_file || '-'}`,
     ];
     const statusEl = document.getElementById('ls-status');
@@ -1541,6 +1643,16 @@ async function refreshLearnStatus() {
   } catch (e) {
     const statusEl = document.getElementById('ls-status');
     if (statusEl) statusEl.textContent = `状态获取失败: ${e.message || e}`;
+  }
+}
+
+async function loadMachineWorkflowJson() {
+  const wfEl = document.getElementById('ls-workflow-json');
+  try {
+    const data = await api('/api/learn-stream/workflow-json');
+    if (wfEl) wfEl.textContent = JSON.stringify(data.workflow || {}, null, 2);
+  } catch (e) {
+    if (wfEl) wfEl.textContent = `workflow JSON 获取失败: ${e.message || e}`;
   }
 }
 

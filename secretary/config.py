@@ -1,13 +1,13 @@
 """
-Kai 系统配置
+machine 系统配置
 
 WORKSPACE (工作区) 优先级:
   1. CLI 参数 --workspace / -w        (最高)
   2. 环境变量 SECRETARY_WORKSPACE
-  3. 持久化配置 kai base <path>
+  3. 持久化配置 machine base <path>
   4. 当前工作目录 CWD                   (最低)
 
-BASE_DIR 统一为 WORKSPACE/Kai
+BASE_DIR 统一为 WORKSPACE/machine
 
 PROMPTS_DIR (提示词模板):
   固定指向包内的 prompts/ 目录，随包分发。
@@ -22,7 +22,7 @@ PROMPTS_DIR = _PACKAGE_DIR / "prompts"          # 提示词模板 (随包分发)
 
 # ============ 工作区路径 (可配置) ============
 # WORKSPACE: 用户指定的工作目录（agent 执行时的工作目录）
-# BASE_DIR: 统一为 WORKSPACE/Kai（系统目录存放位置）
+# BASE_DIR: 统一为 WORKSPACE/machine（系统目录存放位置）
 WORKSPACE: Optional[Path] = None
 
 def _resolve_workspace() -> Path:
@@ -47,8 +47,19 @@ def _resolve_workspace() -> Path:
 # 初始化时使用默认值，CLI 启动时会自动应用当前工作目录
 WORKSPACE = _resolve_workspace()
 
-# BASE_DIR 统一为 WORKSPACE/Kai
-BASE_DIR = WORKSPACE / "Kai"
+def _resolve_base_dir(workspace: Path) -> Path:
+    """默认使用 machine 目录；兼容旧 Kai 目录。"""
+    machine_dir = workspace / "machine"
+    legacy_dir = workspace / "Kai"
+    if machine_dir.exists():
+        return machine_dir
+    if legacy_dir.exists():
+        return legacy_dir
+    return machine_dir
+
+
+# BASE_DIR 统一为 WORKSPACE/machine（若旧目录 Kai 已存在则兼容使用）
+BASE_DIR = _resolve_base_dir(WORKSPACE)
 
 # 自定义目录（用于用户贡献的 agent 类型和提示词）
 CUSTOM_AGENTS_DIR = BASE_DIR / "custom_agents"  # 自定义 agent 类型目录
@@ -131,11 +142,11 @@ def get_workspace() -> Path:
 
 
 def apply_workspace(ws: Path):
-    """运行时切换工作区 (由 CLI --workspace 或 kai base 调用)"""
+    """运行时切换工作区 (由 CLI --workspace 或 machine base 调用)"""
     import secretary.config as _self
     ws_resolved = ws.resolve()
     _self.WORKSPACE = ws_resolved
-    _self.BASE_DIR = ws_resolved / "Kai"
+    _self.BASE_DIR = _resolve_base_dir(ws_resolved)
     _self.CUSTOM_AGENTS_DIR = _self.BASE_DIR / "custom_agents"
     _self.CUSTOM_PROMPTS_DIR = _self.BASE_DIR / "custom_prompts"
     _self.AGENTS_DIR = _self.BASE_DIR / "agents"

@@ -177,15 +177,15 @@ kai start sen --once
 | **持久化配置文件** | `%APPDATA%\kai\settings.json` | `~/.config/kai/settings.json` |
 | **配置项说明** | `base_dir`（工作区）、`cli_name`、`model`、`language` 等，由 `kai base`、`kai name`、`kai model` 等写入。 | 同上。 |
 
-**工作区（BASE_DIR）** 由 `kai base <路径>` 或环境变量 `SECRETARY_WORKSPACE` 决定。工作区确定后，数据路径如下（均相对工作区根目录）：
+**工作区（BASE_DIR）** 由 `machine base <路径>` 或环境变量 `SECRETARY_WORKSPACE` 决定。工作区确定后，数据路径如下（均相对工作区根目录）：
 
 | 路径 | 说明 |
 |------|------|
-| `agents/` | 所有 Agent 目录（含 kai 与各 worker）。 |
-| `agents/kai/` | Kai 专用：`tasks/`、`report/`、`stats/`、`logs/`、`solved-report/`、`unsolved-report/` 等。 |
+| `agents/` | 所有 Agent 目录（含 machine 与各 worker）。 |
+| `agents/machine/` | machine 专用：`tasks/`、`report/`、`stats/`、`logs/`、`solved-report/`、`unsolved-report/` 等。 |
 | `agents/<name>/` | 各 worker：`tasks/`、`ongoing/`、`logs/` 等。 |
 | `skills/` | 学会的技能。 |
-| `agents/kai/goals.md`、`agents/kai/memory.md` | 秘书全局目标与记忆（如 `kai target` 写入）。 |
+| `agents/machine/goals.md`、`agents/machine/memory.md` | 秘书全局目标与记忆（如 `machine target` 写入）。 |
 
 未设置工作区时，使用当前工作目录（CWD）作为工作区。
 
@@ -195,28 +195,28 @@ kai start sen --once
 
 | 类别     | 命令 | 说明 |
 |----------|------|------|
-| 任务     | `kai task "描述"` | 提交任务，经秘书 Agent 归类并分配；`-q` 安静模式；`--time N` 最低执行时间(秒)；`--worker NAME` 直接指定工人。 |
-| 输入流   | `kai learn-stream --output ./out --cookie "<cookie>" --csrf <token>` | 从清华网络学堂同步课件与作业（支持 `--only files/homework`、`--dry-run`）。 |
-| 输入流   | `kai learn-stream-setup` | 交互式配置网络学堂输入流（输出目录、Cookie/CSRF、范围、定时参数）。 |
-| 输入流   | `kai learn-stream-schedule start/stop/status/run-once` | 管理网络学堂定时拉取（后台循环执行）。 |
-| 任务     | `kai keep "持续目标"` | 持续监控模式：队列空时自动生成新任务推进目标；可加 `--worker NAME`。 |
-| 技能     | `kai skills` | 列出所有已学技能（内置 + 自定义）。 |
-| 技能     | `kai learn "描述" skill-name` | 学习新技能。 |
-| 技能     | `kai forget skill-name` | 忘掉一个技能。 |
-| 技能     | `kai use <技能名>` 或 `kai <技能名>` | 使用技能，直接写入对应 worker 的 tasks。内置技能：evolving、analysis、debug。 |
-| 工人     | `kai hire [名字]` | 招募 worker（只注册，不启动）；不写名字则随机生成。 |
-| 工人     | `kai start [名字]` | 启动 worker 扫描器；默认 `sen`。`--once` 只跑一轮；`-q` 后台运行。 |
-| 工人     | `kai fire <名字>` | 解雇 worker。 |
-| 工人     | `kai workers` | 列出所有工人及状态。 |
-| 工人     | `kai stop <名字>` | 停止指定 worker 的进程。 |
-| 后台     | `kai recycle` | 启动回收者（审查 agents/kai/report/）；`--once` 只跑一次；`-q` 安静。 |
-| 后台     | `kai monitor` | 实时监控面板（TUI）；`-i N` 刷新间隔(秒)。 |
-| 状态     | `kai monitor` / `kai monitor --text` | 实时监控面板 (TUI) 或文本状态（待办、进行中、报告、工人、技能等）。 |
-| 报告     | `kai report <worker>` / `kai report all` | 查看指定 worker 或全部报告。 |
-| 设置     | `kai base [路径]` | 设定/查看工作区；`kai base .` 设为当前目录；`kai base --clear` 清除。 |
-| 设置     | `kai name <新名字>` | 给 CLI 改名为其他命令（如 lily）。 |
-| 设置     | `kai model [模型名]` | 设置或查看默认模型（如 Auto、gpt-4、claude-3）。 |
-| 设置     | `kai target [任务1 任务2 ...]` | 设定秘书全局目标；`kai target --clear` 清空；无参数则列出。 |
+| 任务     | `machine task "描述"` | 提交任务，经秘书 Agent 归类并分配；`-q` 安静模式；`--time N` 最低执行时间(秒)；`--worker NAME` 直接指定工人。 |
+| 输入流   | `machine learn-stream --output ./out --cookie "<cookie>" --csrf <token>` | 从清华网络学堂同步课件与作业（支持 `--only files/homework`、`--dry-run`）。 |
+| 输入流   | `machine learn-stream-setup` | 交互式配置网络学堂输入流（输出目录、Cookie/CSRF、范围、定时参数）。 |
+| 输入流   | `machine learn-stream-schedule start/stop/status/run-once` | 管理网络学堂定时拉取（后台循环执行）。 |
+| 任务     | `machine keep "持续目标"` | 持续监控模式：队列空时自动生成新任务推进目标；可加 `--worker NAME`。 |
+| 技能     | `machine skills` | 列出所有已学技能（内置 + 自定义）。 |
+| 技能     | `machine learn "描述" skill-name` | 学习新技能。 |
+| 技能     | `machine forget skill-name` | 忘掉一个技能。 |
+| 技能     | `machine use <技能名>` 或 `machine <技能名>` | 使用技能，直接写入对应 worker 的 tasks。内置技能：evolving、analysis、debug。 |
+| 工人     | `machine hire [名字]` | 招募 worker（只注册，不启动）；不写名字则随机生成。 |
+| 工人     | `machine start [名字]` | 启动 worker 扫描器；默认 `sen`。`--once` 只跑一轮；`-q` 后台运行。 |
+| 工人     | `machine fire <名字>` | 解雇 worker。 |
+| 工人     | `machine workers` | 列出所有工人及状态。 |
+| 工人     | `machine stop <名字>` | 停止指定 worker 的进程。 |
+| 后台     | `machine recycle` | 启动回收者（审查 `agents/machine/report/`）；`--once` 只跑一次；`-q` 安静。 |
+| 后台     | `machine monitor` | 实时监控面板（TUI）；`-i N` 刷新间隔(秒)。 |
+| 状态     | `machine monitor` / `machine monitor --text` | 实时监控面板 (TUI) 或文本状态（待办、进行中、报告、工人、技能等）。 |
+| 报告     | `machine report <worker>` / `machine report all` | 查看指定 worker 或全部报告。 |
+| 设置     | `machine base [路径]` | 设定/查看工作区；`machine base .` 设为当前目录；`machine base --clear` 清除。 |
+| 设置     | `machine name <新名字>` | 给 CLI 改名为其他命令（如 lily）。 |
+| 设置     | `machine model [模型名]` | 设置或查看默认模型（如 Auto、gpt-4、claude-3）。 |
+| 设置     | `machine target [任务1 任务2 ...]` | 设定秘书全局目标；`machine target --clear` 清空；无参数则列出。 |
 | 全局选项 | `kai -l en` / `kai --language zh` | 输出语言：`en` 或 `zh`（也可用环境变量 `SECRETARY_LANGUAGE`）。 |
 | 清理     | `kai clean-logs` | 清理 agents/kai/logs/ 下日志。 |
 | 清理     | `kai clean-processes` | 清理泄露的 worker 进程记录。 |

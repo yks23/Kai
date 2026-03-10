@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Kai — CLI 入口（基于 Cursor Agent 的自动化任务系统）
+machine — CLI 入口（基于 Cursor Agent 的自动化任务系统）
 
 用法:
-  kai task "实现一个HTTP服务器"
-  kai evolving / analysis / debug        (内置技能)
-  kai learn "任务描述" skill-name         (学技能)
-  kai <skill-name>                       (使用技能)
-  kai forget <skill-name>                (忘技能)
-  kai skills                             (列出所有技能)
-  kai hire / recycle                     (后台服务)
-  kai monitor / stop / clean-logs
-  kai base ./          设定工作区为当前目录
-  kai name lily        给我改个名字叫 lily
-  kai target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
+  machine task "实现一个HTTP服务器"
+  machine evolving / analysis / debug        (内置技能)
+  machine learn "任务描述" skill-name         (学技能)
+  machine <skill-name>                       (使用技能)
+  machine forget <skill-name>                (忘技能)
+  machine skills                             (列出所有技能)
+  machine hire / recycle                     (后台服务)
+  machine monitor / stop / clean-logs
+  machine base ./          设定工作区为当前目录
+  machine name lily        给我改个名字叫 lily
+  machine target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
 """
 import argparse
 import os
@@ -2056,7 +2056,7 @@ def cmd_learn_stream_setup(args):
     cookie = ""
     cookie_file = ""
     if use_cookie_file:
-        cookie_file = _ask("   cookie 文件路径", str(config.get("cookie_file", "")).strip() or "~/.config/kai/learn.cookie")
+        cookie_file = _ask("   cookie 文件路径", str(config.get("cookie_file", "")).strip() or "~/.config/machine/learn.cookie")
     else:
         cookie = _ask("   直接粘贴 Cookie", str(config.get("cookie", "")).strip())
 
@@ -2106,7 +2106,7 @@ def cmd_learn_stream_setup(args):
     )
     saved = save_stream_config(config, cfg_path)
     print(f"\n✅ 配置已保存: {saved}")
-    print("   立刻单次执行: kai learn-stream-schedule run-once")
+    print(f"   立刻单次执行: {_cli_name()} learn-stream-schedule run-once")
 
     if _ask_yes_no("是否立即启动定时拉取后台进程", default_yes=False):
         result = start_scheduler(config_path=cfg_path, interval_minutes=interval_minutes, run_now=True)

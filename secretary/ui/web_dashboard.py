@@ -1,6 +1,6 @@
 """
-Kai Web Dashboard
------------------
+machine Web Dashboard
+---------------------
 Lightweight HTTP server that exposes a modern GUI dashboard on localhost:PORT.
 
 Endpoints
@@ -23,6 +23,7 @@ Endpoints
   POST /api/learn-stream/config       → JSON: update learn stream config
   GET  /api/learn-stream/status       → JSON: scheduler status + last run
   GET  /api/learn-stream/log          → JSON: scheduler log tail
+  GET  /api/learn-stream/workflow-json → JSON: e2e-HW-machine workflow spec
   POST /api/learn-stream/run-once     → run one pull immediately
   POST /api/learn-stream/start        → start scheduler loop
   POST /api/learn-stream/stop         → stop scheduler loop
@@ -70,6 +71,10 @@ from secretary.input_streams.scheduler import (
     save_stream_config as learn_save_stream_config,
     start_scheduler as learn_start_scheduler,
     stop_scheduler as learn_stop_scheduler,
+)
+from secretary.machine.workflow import (
+    build_machine_workflow_json,
+    get_machine_workflow_status,
 )
 
 
@@ -428,6 +433,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._api_learn_stream_status()
             elif p == "/api/learn-stream/log":
                 self._api_learn_stream_log()
+            elif p == "/api/learn-stream/workflow-json":
+                self._api_learn_stream_workflow_json()
             elif len(parts) == 3 and parts[0] == "api" and parts[1] == "agent":
                 self._api_agent(parts[2])
             elif len(parts) == 4 and parts[0] == "api" and parts[1] == "agent":
@@ -743,6 +750,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         log_file = learn_get_scheduler_log_path()
         self._json({
             "status": status,
+            "machine": get_machine_workflow_status(),
             "log_file": str(log_file),
             "log_tail": _read_file_safe(log_file, 64 * 1024),
         })
@@ -753,6 +761,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "path": str(log_file),
             "content": _read_file_safe(log_file, 256 * 1024),
             "size": log_file.stat().st_size if log_file.exists() else 0,
+        })
+
+    def _api_learn_stream_workflow_json(self):
+        config = learn_load_stream_config()
+        self._json({
+            "workflow": build_machine_workflow_json(config),
         })
 
     def _post_learn_stream_config(self):
@@ -778,11 +792,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "dry_run",
             "homework_attachments",
             "schedule_interval_minutes",
+            "machine_enabled",
+            "machine_solver_agent",
+            "machine_solver_timeout_minutes",
+            "machine_output_dir",
+            "machine_email_enabled",
+            "machine_email_to",
+            "machine_email_from",
+            "machine_email_subject_template",
+            "machine_smtp_host",
+            "machine_smtp_port",
+            "machine_smtp_user",
+            "machine_smtp_password",
+            "machine_smtp_use_tls",
         }
         for key, value in cfg_update.items():
             if key not in allowed:
                 continue
             if key in {"dry_run", "homework_attachments"}:
+                config[key] = bool(value)
+            elif key in {"machine_enabled", "machine_email_enabled", "machine_smtp_use_tls"}:
                 config[key] = bool(value)
             elif key == "timeout":
                 try:
@@ -790,14 +819,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self._json({"error": "timeout must be a number"}, 400)
                     return
-            elif key == "schedule_interval_minutes":
+            elif key in {"schedule_interval_minutes", "machine_solver_timeout_minutes", "machine_smtp_port"}:
                 try:
                     iv = int(value)
                 except (TypeError, ValueError):
-                    self._json({"error": "schedule_interval_minutes must be an integer"}, 400)
+                    self._json({"error": f"{key} must be an integer"}, 400)
                     return
                 if iv <= 0:
-                    self._json({"error": "schedule_interval_minutes must be > 0"}, 400)
+                    self._json({"error": f"{key} must be > 0"}, 400)
                     return
                 config[key] = iv
             elif key in {"only"}:
@@ -1282,7 +1311,7 @@ def run_dashboard(port: int = 12345, open_browser: bool = True):
     server.timeout = 0.5           # handle_request() returns after 0.5 s if no request
     server.daemon_threads = True   # handler threads won't block shutdown
     url = f"http://127.0.0.1:{port}"
-    _print(f"\n\033[1;36mKai Dashboard\033[0m  ->  \033[4m{url}\033[0m")
+    _print(f"\n\033[1;36mmachine Dashboard\033[0m  ->  \033[4m{url}\033[0m")
     _print(f"\033[2m workspace: {cfg.BASE_DIR}  |  Ctrl+C to quit\033[0m\n")
 
     if open_browser:
