@@ -465,6 +465,87 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
     </div>
   </div>
 
+  <!-- ── Learn stream modal overlay ── -->
+  <div id="learn-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2000;align-items:center;justify-content:center;">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 20px;width:560px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.5);">
+      <div style="display:flex;align-items:center;margin-bottom:14px;">
+        <span style="font-size:15px;font-weight:700;flex:1;color:var(--text)">🎓 网络学堂连接配置</span>
+        <button onclick="closeLearnOverlay()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:0 4px;">✕</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;">
+        <div style="grid-column:1 / span 2;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">输出目录</label>
+          <input id="ls-output" placeholder="/path/to/learn_sync" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Cookie 文件</label>
+          <input id="ls-cookie-file" placeholder="~/.config/kai/learn.cookie" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">CSRF Token</label>
+          <input id="ls-csrf" placeholder="可留空改用 LEARN_CSRF 环境变量" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+        </div>
+        <div style="grid-column:1 / span 2;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">Cookie（可选，优先于文件）</label>
+          <textarea id="ls-cookie" placeholder="直接粘贴 Cookie；为空时会读 cookie 文件或 LEARN_COOKIE" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:12px;font-family:monospace;height:56px;resize:vertical;"></textarea>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">同步范围</label>
+          <select id="ls-only" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;">
+            <option value="all">all（课件+作业）</option>
+            <option value="files">files（仅课件）</option>
+            <option value="homework">homework（仅作业）</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">语言</label>
+          <select id="ls-lang" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;">
+            <option value="zh">zh</option>
+            <option value="en">en</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">学期 ID（可空）</label>
+          <input id="ls-semester" placeholder="如 2025-2026-1；留空自动当前学期" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">超时（秒）</label>
+          <input id="ls-timeout" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:4px;">定时间隔（分钟）</label>
+          <input id="ls-interval" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:6px 10px;color:var(--text);font-size:13px;" />
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;">
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+          <input type="checkbox" id="ls-dry-run" style="accent-color:var(--green);cursor:pointer" />
+          <span style="font-size:12px;color:var(--text)">Dry-run（只抓索引）</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+          <input type="checkbox" id="ls-homework-attachments" style="accent-color:var(--green);cursor:pointer" checked />
+          <span style="font-size:12px;color:var(--text)">下载作业附件</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+          <input type="checkbox" id="ls-run-now-start" style="accent-color:var(--green);cursor:pointer" checked />
+          <span style="font-size:12px;color:var(--text)">启动定时后立刻先执行一次</span>
+        </label>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+        <button onclick="saveLearnConfig()" style="padding:7px 12px;background:var(--accent);border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">保存配置</button>
+        <button onclick="learnRunOnce()" style="padding:7px 12px;background:#1f6feb;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">单次拉取</button>
+        <button onclick="learnStartSchedule()" style="padding:7px 12px;background:#2f8f46;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">启动定时</button>
+        <button onclick="learnStopSchedule()" style="padding:7px 12px;background:#8b2d2d;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">停止定时</button>
+        <button onclick="refreshLearnStatus()" style="padding:7px 12px;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-weight:600;cursor:pointer;">刷新状态</button>
+      </div>
+      <div id="ls-msg" style="margin-top:8px;font-size:12px;min-height:16px;color:var(--muted);"></div>
+      <pre id="ls-status" style="margin-top:10px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;"></pre>
+      <div style="margin-top:8px;font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.03em;">调度日志（末尾）</div>
+      <pre id="ls-log" style="margin-top:6px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:#abb2bf;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto;"></pre>
+    </div>
+  </div>
+
   <!-- ── Sidebar ── -->
   <nav class="sidebar">
     <div class="sidebar-header">
@@ -481,6 +562,9 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
     </div>
     <div class="graph-btn" onclick="openTypesOverlay()" style="border-top:0;">
       <span>🔧</span><span>类型管理</span>
+    </div>
+    <div class="graph-btn" onclick="openLearnOverlay()" style="border-top:0;">
+      <span>🎓</span><span>网络学堂</span>
     </div>
     <div class="sidebar-section">Agents</div>
     <div class="agent-list" id="agent-list"></div>
@@ -1261,7 +1345,204 @@ document.addEventListener('click', e => {
   if (ov && e.target === ov) closeHireOverlay();
   const tov = document.getElementById('types-overlay');
   if (tov && e.target === tov) closeTypesOverlay();
+  const lov = document.getElementById('learn-overlay');
+  if (lov && e.target === lov) closeLearnOverlay();
 });
+
+// ── Learn stream overlay ────────────────────────────────────────────────────
+
+function _lsSetValue(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.value = value ?? '';
+}
+
+function _lsSetChecked(id, checked) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.checked = !!checked;
+}
+
+function _lsGetValue(id) {
+  const el = document.getElementById(id);
+  return (el?.value || '').trim();
+}
+
+function _lsGetChecked(id) {
+  const el = document.getElementById(id);
+  return !!el?.checked;
+}
+
+function _lsMsg(msg, color = 'var(--muted)') {
+  const el = document.getElementById('ls-msg');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = color;
+}
+
+async function openLearnOverlay() {
+  const ov = document.getElementById('learn-overlay');
+  ov.style.display = 'flex';
+  await loadLearnConfig();
+  await refreshLearnStatus();
+}
+
+function closeLearnOverlay() {
+  const ov = document.getElementById('learn-overlay');
+  if (ov) ov.style.display = 'none';
+}
+
+async function loadLearnConfig() {
+  try {
+    const data = await api('/api/learn-stream/config');
+    const c = data.config || {};
+    _lsSetValue('ls-output', c.output_dir || '');
+    _lsSetValue('ls-cookie-file', c.cookie_file || '');
+    _lsSetValue('ls-cookie', c.cookie || '');
+    _lsSetValue('ls-csrf', c.csrf_token || '');
+    _lsSetValue('ls-semester', c.semester_id || '');
+    _lsSetValue('ls-only', c.only || 'all');
+    _lsSetValue('ls-lang', c.lang || 'zh');
+    _lsSetValue('ls-timeout', String(c.timeout ?? 20));
+    _lsSetValue('ls-interval', String(c.schedule_interval_minutes ?? 360));
+    _lsSetChecked('ls-dry-run', !!c.dry_run);
+    _lsSetChecked('ls-homework-attachments', !!c.homework_attachments);
+    _lsMsg(`配置已加载: ${data.config_path || ''}`);
+  } catch (e) {
+    _lsMsg(`加载配置失败: ${e.message || e}`, 'var(--red)');
+  }
+}
+
+async function saveLearnConfig() {
+  const interval = parseInt(_lsGetValue('ls-interval') || '0', 10);
+  const timeout = parseFloat(_lsGetValue('ls-timeout') || '0');
+  if (!Number.isFinite(interval) || interval <= 0) {
+    _lsMsg('定时间隔必须是大于 0 的整数', 'var(--red)');
+    return;
+  }
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    _lsMsg('超时必须是大于 0 的数字', 'var(--red)');
+    return;
+  }
+
+  const config = {
+    output_dir: _lsGetValue('ls-output'),
+    cookie_file: _lsGetValue('ls-cookie-file'),
+    cookie: _lsGetValue('ls-cookie'),
+    csrf_token: _lsGetValue('ls-csrf'),
+    semester_id: _lsGetValue('ls-semester'),
+    only: _lsGetValue('ls-only') || 'all',
+    lang: _lsGetValue('ls-lang') || 'zh',
+    timeout,
+    dry_run: _lsGetChecked('ls-dry-run'),
+    homework_attachments: _lsGetChecked('ls-homework-attachments'),
+    schedule_interval_minutes: interval,
+  };
+  try {
+    const data = await api('/api/learn-stream/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({config}),
+    });
+    _lsMsg(`配置已保存: ${data.config_path || ''}`, 'var(--green)');
+    showToast('info', '网络学堂配置已保存', data.config_path || '');
+  } catch (e) {
+    _lsMsg(`保存失败: ${e.message || e}`, 'var(--red)');
+  }
+}
+
+async function learnRunOnce() {
+  _lsMsg('正在执行单次拉取…');
+  try {
+    const data = await api('/api/learn-stream/run-once', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const stats = data.result?.stats || {};
+    _lsMsg(
+      `单次拉取完成：课程 ${stats.courses_processed || 0}，课件 ${stats.courseware_downloaded || 0}/${stats.courseware_items || 0}，作业附件 ${stats.homework_attachments_downloaded || 0}/${stats.homework_attachments || 0}，错误 ${stats.errors || 0}`,
+      'var(--green)'
+    );
+    await refreshLearnStatus();
+  } catch (e) {
+    _lsMsg(`单次拉取失败: ${e.message || e}`, 'var(--red)');
+  }
+}
+
+async function learnStartSchedule() {
+  const interval = parseInt(_lsGetValue('ls-interval') || '0', 10);
+  if (!Number.isFinite(interval) || interval <= 0) {
+    _lsMsg('定时间隔必须是大于 0 的整数', 'var(--red)');
+    return;
+  }
+  try {
+    await saveLearnConfig();
+    const data = await api('/api/learn-stream/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        interval_minutes: interval,
+        run_now: _lsGetChecked('ls-run-now-start'),
+      }),
+    });
+    const r = data.result || {};
+    if (r.started) {
+      _lsMsg(`定时已启动，PID=${r.pid}，间隔=${r.interval_minutes} 分钟`, 'var(--green)');
+    } else {
+      _lsMsg(`已在运行，PID=${r.status?.pid || '?'}`, 'var(--yellow)');
+    }
+    await refreshLearnStatus();
+  } catch (e) {
+    _lsMsg(`启动失败: ${e.message || e}`, 'var(--red)');
+  }
+}
+
+async function learnStopSchedule() {
+  try {
+    const data = await api('/api/learn-stream/stop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const r = data.result || {};
+    if (r.stopped) {
+      _lsMsg(`定时已停止，PID=${r.pid}`, 'var(--green)');
+    } else {
+      _lsMsg(`未停止：${r.reason || 'unknown'}`, 'var(--yellow)');
+    }
+    await refreshLearnStatus();
+  } catch (e) {
+    _lsMsg(`停止失败: ${e.message || e}`, 'var(--red)');
+  }
+}
+
+async function refreshLearnStatus() {
+  try {
+    const data = await api('/api/learn-stream/status');
+    const st = data.status || {};
+    const lr = st.last_run || {};
+    const stats = lr.stats || {};
+    const lines = [
+      `运行中: ${st.running ? '是' : '否'}`,
+      `PID: ${st.pid || '-'}`,
+      `配置: ${st.config_path || '-'}`,
+      `间隔(分钟): ${st.interval_minutes || '-'}`,
+      `启动时间: ${st.started_at || '-'}`,
+      `最近执行: ${lr.timestamp || '-'}`,
+      `最近成功: ${lr.success === undefined ? '-' : String(lr.success)}`,
+      `最近统计: 课程=${stats.courses_processed || 0}, 课件=${stats.courseware_downloaded || 0}/${stats.courseware_items || 0}, 作业附件=${stats.homework_attachments_downloaded || 0}/${stats.homework_attachments || 0}, 错误=${stats.errors || 0}`,
+      `日志路径: ${data.log_file || '-'}`,
+    ];
+    const statusEl = document.getElementById('ls-status');
+    if (statusEl) statusEl.textContent = lines.join('\n');
+    const logEl = document.getElementById('ls-log');
+    if (logEl) logEl.textContent = data.log_tail || '(无日志)';
+  } catch (e) {
+    const statusEl = document.getElementById('ls-status');
+    if (statusEl) statusEl.textContent = `状态获取失败: ${e.message || e}`;
+  }
+}
 
 // ── Types management overlay ────────────────────────────────────────────────
 

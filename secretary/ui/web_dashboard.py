@@ -19,6 +19,13 @@ Endpoints
   POST /api/fire/<name>               → delete agent
   POST /api/link                      → {from_agent, to_agent} → add link
   DELETE /api/link                    → {from_agent, to_agent} → remove link
+  GET  /api/learn-stream/config       → JSON: learn stream config
+  POST /api/learn-stream/config       → JSON: update learn stream config
+  GET  /api/learn-stream/status       → JSON: scheduler status + last run
+  GET  /api/learn-stream/log          → JSON: scheduler log tail
+  POST /api/learn-stream/run-once     → run one pull immediately
+  POST /api/learn-stream/start        → start scheduler loop
+  POST /api/learn-stream/stop         → stop scheduler loop
   GET  /events                        → SSE stream (agent status + log tails)
 """
 
@@ -53,6 +60,16 @@ from secretary.agents import (
     get_agent_known_agents,
     add_known_agent_link,
     remove_known_agent_link,
+)
+from secretary.input_streams.scheduler import (
+    get_default_config_path as learn_get_default_config_path,
+    get_scheduler_log_path as learn_get_scheduler_log_path,
+    get_scheduler_status as learn_get_scheduler_status,
+    load_stream_config as learn_load_stream_config,
+    run_once_from_config as learn_run_once_from_config,
+    save_stream_config as learn_save_stream_config,
+    start_scheduler as learn_start_scheduler,
+    stop_scheduler as learn_stop_scheduler,
 )
 
 
@@ -405,6 +422,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._api_agent_skills_list()
             elif p == "/api/server-log":
                 self._json(_slog.records())
+            elif p == "/api/learn-stream/config":
+                self._api_learn_stream_config()
+            elif p == "/api/learn-stream/status":
+                self._api_learn_stream_status()
+            elif p == "/api/learn-stream/log":
+                self._api_learn_stream_log()
             elif len(parts) == 3 and parts[0] == "api" and parts[1] == "agent":
                 self._api_agent(parts[2])
             elif len(parts) == 4 and parts[0] == "api" and parts[1] == "agent":
@@ -452,6 +475,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._post_hire()
             elif p == "/api/link":
                 self._post_link(add=True)
+            elif p == "/api/learn-stream/config":
+                self._post_learn_stream_config()
+            elif p == "/api/learn-stream/run-once":
+                self._post_learn_stream_run_once()
+            elif p == "/api/learn-stream/start":
+                self._post_learn_stream_start()
+            elif p == "/api/learn-stream/stop":
+                self._post_learn_stream_stop()
             elif len(parts) == 3 and parts[0] == "api" and parts[1] == "fire":
                 self._post_fire(parts[2])
             elif len(parts) == 4 and parts[0] == "api" and parts[1] == "agent" and parts[3] == "task":
@@ -697,6 +728,144 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         self._json(get_agent_known_agents(name))   # None = knows all
+
+    # ── Learn stream config & scheduler API ──
+
+    def _api_learn_stream_config(self):
+        config = learn_load_stream_config()
+        self._json({
+            "config": config,
+            "config_path": str(learn_get_default_config_path()),
+        })
+
+    def _api_learn_stream_status(self):
+        status = learn_get_scheduler_status()
+        log_file = learn_get_scheduler_log_path()
+        self._json({
+            "status": status,
+            "log_file": str(log_file),
+            "log_tail": _read_file_safe(log_file, 64 * 1024),
+        })
+
+    def _api_learn_stream_log(self):
+        log_file = learn_get_scheduler_log_path()
+        self._json({
+            "path": str(log_file),
+            "content": _read_file_safe(log_file, 256 * 1024),
+            "size": log_file.stat().st_size if log_file.exists() else 0,
+        })
+
+    def _post_learn_stream_config(self):
+        body = self._read_json()
+        if body is None:
+            return
+        cfg_update = body.get("config")
+        if not isinstance(cfg_update, dict):
+            self._json({"error": "config object required"}, 400)
+            return
+
+        config = learn_load_stream_config()
+        allowed = {
+            "output_dir",
+            "cookie",
+            "cookie_file",
+            "csrf_token",
+            "semester_id",
+            "only",
+            "lang",
+            "base_url",
+            "timeout",
+            "dry_run",
+            "homework_attachments",
+            "schedule_interval_minutes",
+        }
+        for key, value in cfg_update.items():
+            if key not in allowed:
+                continue
+            if key in {"dry_run", "homework_attachments"}:
+                config[key] = bool(value)
+            elif key == "timeout":
+                try:
+                    config[key] = float(value)
+                except (TypeError, ValueError):
+                    self._json({"error": "timeout must be a number"}, 400)
+                    return
+            elif key == "schedule_interval_minutes":
+                try:
+                    iv = int(value)
+                except (TypeError, ValueError):
+                    self._json({"error": "schedule_interval_minutes must be an integer"}, 400)
+                    return
+                if iv <= 0:
+                    self._json({"error": "schedule_interval_minutes must be > 0"}, 400)
+                    return
+                config[key] = iv
+            elif key in {"only"}:
+                v = str(value).strip().lower()
+                if v not in {"all", "files", "homework"}:
+                    self._json({"error": "only must be one of all/files/homework"}, 400)
+                    return
+                config[key] = v
+            elif key in {"lang"}:
+                v = str(value).strip().lower()
+                if v not in {"zh", "en"}:
+                    self._json({"error": "lang must be zh or en"}, 400)
+                    return
+                config[key] = v
+            else:
+                config[key] = str(value or "").strip()
+
+        saved = learn_save_stream_config(config)
+        _slog.info("learn-stream config updated via web dashboard")
+        self._json({
+            "ok": True,
+            "config_path": str(saved),
+            "config": config,
+        })
+
+    def _post_learn_stream_run_once(self):
+        body = self._read_json()
+        if body is None:
+            return
+        config_path = body.get("config_path") if isinstance(body, dict) else None
+        try:
+            result = learn_run_once_from_config(config_path=config_path)
+        except Exception as exc:
+            _slog.error(f"learn-stream run-once failed: {exc}", exc)
+            self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        self._json({"ok": True, "result": result})
+
+    def _post_learn_stream_start(self):
+        body = self._read_json()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "invalid json body"}, 400)
+            return
+        config_path = body.get("config_path")
+        interval = body.get("interval_minutes")
+        run_now = bool(body.get("run_now", True))
+        try:
+            result = learn_start_scheduler(
+                config_path=config_path,
+                interval_minutes=int(interval) if interval is not None else None,
+                run_now=run_now,
+            )
+        except Exception as exc:
+            _slog.error(f"learn-stream scheduler start failed: {exc}", exc)
+            self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        self._json({"ok": True, "result": result})
+
+    def _post_learn_stream_stop(self):
+        try:
+            result = learn_stop_scheduler()
+        except Exception as exc:
+            _slog.error(f"learn-stream scheduler stop failed: {exc}", exc)
+            self._json({"ok": False, "error": str(exc)}, 500)
+            return
+        self._json({"ok": True, "result": result})
 
     # ── Custom Types API ──
 
