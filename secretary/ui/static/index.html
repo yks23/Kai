@@ -594,6 +594,7 @@ code { background: var(--card); border: 1px solid var(--border); padding: 1px 4p
 
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
         <button onclick="saveLearnConfig()" style="padding:7px 12px;background:var(--accent);border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">保存配置</button>
+        <button onclick="importLearnAuthFromBrowser()" style="padding:7px 12px;background:#495057;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">浏览器导入登录态</button>
         <button onclick="learnRunOnce()" style="padding:7px 12px;background:#1f6feb;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">单次拉取</button>
         <button onclick="learnStartSchedule()" style="padding:7px 12px;background:#2f8f46;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">启动定时</button>
         <button onclick="learnStopSchedule()" style="padding:7px 12px;background:#8b2d2d;border:none;border-radius:6px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">停止定时</button>
@@ -1486,6 +1487,26 @@ async function loadLearnConfig() {
     _lsMsg(`配置已加载: ${data.config_path || ''}`);
   } catch (e) {
     _lsMsg(`加载配置失败: ${e.message || e}`, 'var(--red)');
+  }
+}
+
+async function importLearnAuthFromBrowser() {
+  _lsMsg('正在从浏览器导入登录态…');
+  try {
+    const data = await api('/api/learn-stream/import-browser-auth', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({browser: 'auto', open_login: true}),
+    });
+    const r = data.result || {};
+    await loadLearnConfig();
+    _lsMsg(
+      `导入成功: browser=${r.browser || '-'}; ${r.csrf_found ? 'CSRF已找到' : 'CSRF未找到，请手动补充'}`,
+      'var(--green)'
+    );
+    showToast('info', '已导入浏览器登录态', r.cookie_file || '');
+  } catch (e) {
+    _lsMsg(`导入失败: ${e.message || e}`, 'var(--red)');
   }
 }
 

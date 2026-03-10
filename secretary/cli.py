@@ -2118,6 +2118,33 @@ def cmd_learn_stream_setup(args):
             print(f"   ⚠️ 启动失败: {reason}")
 
 
+def cmd_learn_stream_auth(args):
+    """从浏览器自动导入网络学堂 Cookie / CSRF。"""
+    from secretary.input_streams.browser_auth import import_learn_auth_from_browser
+    from secretary.input_streams.scheduler import get_default_config_path
+
+    config_path = args.config or str(get_default_config_path())
+    try:
+        result = import_learn_auth_from_browser(
+            config_path=config_path,
+            browser=getattr(args, "browser", "auto"),
+            open_login=bool(getattr(args, "open_login", False)),
+            base_url=getattr(args, "base_url", "https://learn.tsinghua.edu.cn"),
+        )
+    except Exception as e:
+        print(f"❌ 浏览器导入失败: {e}")
+        print("   提示：先在本机浏览器登录 learn.tsinghua.edu.cn，再重试。")
+        print("   如缺少依赖，请执行: pip install browser-cookie3")
+        return
+
+    print("✅ 已从浏览器导入登录态")
+    print(f"   浏览器: {result.get('browser')}")
+    print(f"   配置: {result.get('config_path')}")
+    print(f"   Cookie 文件: {result.get('cookie_file')}")
+    print(f"   CSRF: {'已找到' if result.get('csrf_found') else '未找到（请在配置中补充）'}")
+    print(f"   下一步: {_cli_name()} learn-stream-schedule run-once")
+
+
 def cmd_learn_stream_schedule(args):
     """管理网络学堂定时拉取任务。"""
     from secretary.input_streams.scheduler import (
@@ -2485,6 +2512,21 @@ def cmd_help(args):
   逐步引导你配置输出目录、Cookie/CSRF 来源、拉取范围和定时间隔，
   并可在结束后直接启动定时拉取。
 """,
+            "learn-stream-auth": f"""
+🔐 浏览器自动导入网络学堂登录态
+
+用法:
+  {name} learn-stream-auth [--browser auto|chrome|chromium|edge|firefox|brave]
+
+说明:
+  读取本机浏览器中 learn.tsinghua.edu.cn 的 Cookie，
+  自动写入 learn-stream 配置（优先写 cookie_file），并尝试自动解析 CSRF。
+
+常用参数:
+  --open-login           先自动打开登录页
+  --config <路径>         指定配置文件（默认 learn_stream/config.json）
+  --base-url <URL>       默认 https://learn.tsinghua.edu.cn
+""",
             "learn-stream-schedule": f"""
 ⏱️ 定时拉取管理
 
@@ -2535,6 +2577,7 @@ def _print_command_list(name: str):
             ("task", "提交任务（写入 agent 的 tasks/ 目录）"),
             ("learn-stream", "同步网络学堂作业/课件到本地目录"),
             ("learn-stream-setup", "交互式配置 learn-stream"),
+            ("learn-stream-auth", "从浏览器自动导入 Cookie/CSRF"),
             ("learn-stream-schedule", "管理定时拉取（start/stop/status）"),
         ]),
         ("👷 Agent管理 (hire 统一入口)", [
@@ -2952,6 +2995,37 @@ Agent管理 (hire 统一入口):
         description="通过交互问答配置 learn-stream 参数，并可选启动定时拉取。",
     )
 
+    # ---- learn-stream-auth ----
+    p = subparsers.add_parser(
+        "learn-stream-auth",
+        help="🔐 从浏览器自动导入网络学堂登录态",
+        description="自动读取浏览器中的 learn.tsinghua.edu.cn Cookie，并尝试提取 CSRF。",
+    )
+    p.add_argument(
+        "--browser",
+        type=str,
+        default="auto",
+        choices=["auto", "chrome", "chromium", "edge", "firefox", "brave"],
+        help="指定浏览器（默认 auto 自动尝试）",
+    )
+    p.add_argument(
+        "--open-login",
+        action="store_true",
+        help="先自动打开网络学堂登录页",
+    )
+    p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="配置文件路径（默认: BASE_DIR/learn_stream/config.json）",
+    )
+    p.add_argument(
+        "--base-url",
+        type=str,
+        default="https://learn.tsinghua.edu.cn",
+        help="网络学堂登录页地址",
+    )
+
     # ---- learn-stream-schedule ----
     p = subparsers.add_parser(
         "learn-stream-schedule",
@@ -3033,6 +3107,7 @@ Agent管理 (hire 统一入口):
         "model": cmd_model,
         "learn-stream": cmd_learn_stream,
         "learn-stream-setup": cmd_learn_stream_setup,
+        "learn-stream-auth": cmd_learn_stream_auth,
         "learn-stream-schedule": cmd_learn_stream_schedule,
         "target": cmd_target,
         "help": cmd_help,
@@ -3068,7 +3143,7 @@ Agent管理 (hire 统一入口):
         pass  # 如果初始化失败，不影响其他功能
 
     # base / name / model / help 命令不需要 ensure_dirs
-    if args.command in ("base", "name", "model", "help", "upgrade", "learn-stream"):
+    if args.command in ("base", "name", "model", "help", "upgrade", "learn-stream", "learn-stream-auth"):
         handlers[args.command](args)
         return
 
