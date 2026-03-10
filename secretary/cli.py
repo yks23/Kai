@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Kai — CLI 入口（基于 Cursor Agent 的自动化任务系统）
+machine — CLI 入口（基于 Cursor Agent 的自动化任务系统）
 
 用法:
-  kai task "实现一个HTTP服务器"
-  kai evolving / analysis / debug        (内置技能)
-  kai learn "任务描述" skill-name         (学技能)
-  kai <skill-name>                       (使用技能)
-  kai forget <skill-name>                (忘技能)
-  kai skills                             (列出所有技能)
-  kai hire / recycle                     (后台服务)
-  kai monitor / stop / clean-logs
-  kai base ./          设定工作区为当前目录
-  kai name lily        给我改个名字叫 lily
-  kai target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
+  machine task "实现一个HTTP服务器"
+  machine evolving / analysis / debug        (内置技能)
+  machine learn "任务描述" skill-name         (学技能)
+  machine <skill-name>                       (使用技能)
+  machine forget <skill-name>                (忘技能)
+  machine skills                             (列出所有技能)
+  machine hire / recycle                     (后台服务)
+  machine monitor / stop / clean-logs
+  machine base ./          设定工作区为当前目录
+  machine name lily        给我改个名字叫 lily
+  machine target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
 """
 import argparse
 import os
@@ -1948,6 +1948,278 @@ def cmd_model(args):
     print(f"   ✅ 已保存，后续任务将使用 {new_model} 模型")
 
 
+def cmd_learn_stream(args):
+    """网络学堂输入流：同步作业与课件到指定目录。"""
+    from secretary.input_streams import LearnStreamError, run_learn_stream
+
+    cookie = (getattr(args, "cookie", None) or "").strip()
+    cookie_file = (getattr(args, "cookie_file", None) or "").strip()
+    if not cookie and cookie_file:
+        try:
+            cookie = Path(cookie_file).expanduser().read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"❌ 读取 cookie 文件失败: {e}")
+            return
+    if not cookie:
+        cookie = os.environ.get("LEARN_COOKIE", "").strip()
+
+    csrf_token = (getattr(args, "csrf", None) or "").strip()
+    if not csrf_token:
+        csrf_token = os.environ.get("LEARN_CSRF", "").strip()
+
+    if not cookie:
+        print("❌ 缺少登录 Cookie")
+        print("   传参: --cookie 'name=value; ...' 或 --cookie-file /path/to/cookie.txt")
+        print("   或环境变量: LEARN_COOKIE")
+        return
+    if not csrf_token:
+        print("❌ 缺少 CSRF Token")
+        print("   传参: --csrf <token> 或环境变量: LEARN_CSRF")
+        return
+
+    mode = getattr(args, "only", "all")
+    include_files = mode in ("all", "files")
+    include_homework = mode in ("all", "homework")
+
+    try:
+        result = run_learn_stream(
+            cookie=cookie,
+            csrf_token=csrf_token,
+            output_dir=args.output,
+            semester_id=args.semester,
+            include_files=include_files,
+            include_homework=include_homework,
+            download_homework_attachments=getattr(args, "homework_attachments", True),
+            dry_run=getattr(args, "dry_run", False),
+            lang=args.lang,
+            base_url=args.base_url,
+            timeout=args.timeout,
+        )
+    except LearnStreamError as e:
+        print(f"❌ 输入流执行失败: {e}")
+        return
+    except Exception as e:
+        print(f"❌ 输入流异常: {e}")
+        return
+
+    stats = result.get("stats", {})
+    print("\n✅ 网络学堂输入流执行完成")
+    print(f"   输出目录: {Path(args.output).expanduser().resolve()}")
+    print(f"   学期: {result.get('semester_id')}")
+    print(f"   课程: {stats.get('courses_processed', 0)}")
+    print(f"   课件: {stats.get('courseware_downloaded', 0)}/{stats.get('courseware_items', 0)}")
+    print(
+        "   作业附件: "
+        f"{stats.get('homework_attachments_downloaded', 0)}/{stats.get('homework_attachments', 0)}"
+    )
+    print(f"   错误: {stats.get('errors', 0)}")
+    print("   清单: learn_stream_manifest.json")
+
+
+def cmd_learn_stream_setup(args):
+    """交互式配置网络学堂输入流。"""
+    from secretary.input_streams.scheduler import (
+        DEFAULT_INTERVAL_MINUTES,
+        get_default_config_path,
+        load_stream_config,
+        save_stream_config,
+        start_scheduler,
+    )
+
+    def _ask(prompt: str, default: str | None = None) -> str:
+        suffix = f" [{default}]" if default not in (None, "") else ""
+        value = input(f"{prompt}{suffix}: ").strip()
+        if value:
+            return value
+        return default or ""
+
+    def _ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
+        mark = "Y/n" if default_yes else "y/N"
+        value = input(f"{prompt} ({mark}): ").strip().lower()
+        if not value:
+            return default_yes
+        return value in ("y", "yes", "1", "true")
+
+    cfg_path = get_default_config_path()
+    config = load_stream_config(cfg_path)
+
+    print("\n🧭 网络学堂输入流配置向导")
+    print(f"   配置文件: {cfg_path}")
+    print("   建议优先使用 cookie 文件，避免明文写入配置。")
+
+    output_dir = _ask("1) 输出目录", str(config.get("output_dir", "")))
+    mode = _ask("2) 同步范围 all/files/homework", str(config.get("only", "all"))).lower()
+    if mode not in ("all", "files", "homework"):
+        mode = "all"
+
+    use_cookie_file = _ask_yes_no("3) 使用 cookie 文件而不是明文 cookie", default_yes=bool(config.get("cookie_file")))
+    cookie = ""
+    cookie_file = ""
+    if use_cookie_file:
+        cookie_file = _ask("   cookie 文件路径", str(config.get("cookie_file", "")).strip() or "~/.config/machine/learn.cookie")
+    else:
+        cookie = _ask("   直接粘贴 Cookie", str(config.get("cookie", "")).strip())
+
+    use_env_csrf = _ask_yes_no("4) CSRF Token 使用环境变量 LEARN_CSRF", default_yes=not bool(config.get("csrf_token")))
+    csrf_token = "" if use_env_csrf else _ask("   直接填写 CSRF Token", str(config.get("csrf_token", "")).strip())
+
+    semester_id = _ask("5) 学期 ID（留空=自动当前学期）", str(config.get("semester_id", "")).strip())
+    lang = _ask("6) 语言 zh/en", str(config.get("lang", "zh"))).lower()
+    if lang not in ("zh", "en"):
+        lang = "zh"
+    timeout_raw = _ask("7) 超时时间（秒）", str(config.get("timeout", 20.0)))
+    try:
+        timeout = float(timeout_raw)
+    except ValueError:
+        timeout = 20.0
+
+    homework_attachments = _ask_yes_no(
+        "8) 下载作业附件（会访问作业详情页）",
+        default_yes=bool(config.get("homework_attachments", True)),
+    )
+    dry_run = _ask_yes_no("9) Dry-run（仅抓索引，不下载）", default_yes=bool(config.get("dry_run", False)))
+
+    interval_raw = _ask(
+        "10) 定时拉取间隔（分钟）",
+        str(config.get("schedule_interval_minutes", DEFAULT_INTERVAL_MINUTES)),
+    )
+    try:
+        interval_minutes = max(1, int(interval_raw))
+    except ValueError:
+        interval_minutes = DEFAULT_INTERVAL_MINUTES
+
+    config.update(
+        {
+            "output_dir": output_dir,
+            "only": mode,
+            "cookie": cookie,
+            "cookie_file": cookie_file,
+            "csrf_token": csrf_token,
+            "semester_id": semester_id,
+            "lang": lang,
+            "base_url": str(config.get("base_url", "https://learn.tsinghua.edu.cn")),
+            "timeout": timeout,
+            "dry_run": dry_run,
+            "homework_attachments": homework_attachments,
+            "schedule_interval_minutes": interval_minutes,
+        }
+    )
+    saved = save_stream_config(config, cfg_path)
+    print(f"\n✅ 配置已保存: {saved}")
+    print(f"   立刻单次执行: {_cli_name()} learn-stream-schedule run-once")
+
+    if _ask_yes_no("是否立即启动定时拉取后台进程", default_yes=False):
+        result = start_scheduler(config_path=cfg_path, interval_minutes=interval_minutes, run_now=True)
+        if result.get("started"):
+            print(f"   ✅ 已启动，PID={result.get('pid')}")
+            print(f"   📄 日志: {result.get('log_file')}")
+        else:
+            reason = result.get("reason", "unknown")
+            print(f"   ⚠️ 启动失败: {reason}")
+
+
+def cmd_learn_stream_schedule(args):
+    """管理网络学堂定时拉取任务。"""
+    from secretary.input_streams.scheduler import (
+        get_default_config_path,
+        get_scheduler_status,
+        run_once_from_config,
+        run_scheduler_loop,
+        start_scheduler,
+        stop_scheduler,
+    )
+
+    action = args.action
+    config_path = args.config or str(get_default_config_path())
+
+    if action == "run-once":
+        try:
+            result = run_once_from_config(config_path=config_path)
+        except Exception as e:
+            print(f"❌ 单次拉取失败: {e}")
+            return
+        stats = result.get("stats", {})
+        print("✅ 单次拉取完成")
+        print(f"   课程: {stats.get('courses_processed', 0)}")
+        print(f"   课件: {stats.get('courseware_downloaded', 0)}/{stats.get('courseware_items', 0)}")
+        print(
+            "   作业附件: "
+            f"{stats.get('homework_attachments_downloaded', 0)}/{stats.get('homework_attachments', 0)}"
+        )
+        print(f"   错误: {stats.get('errors', 0)}")
+        return
+
+    if action == "start":
+        try:
+            result = start_scheduler(
+                config_path=config_path,
+                interval_minutes=args.interval_minutes,
+                run_now=not args.no_run_now,
+            )
+        except Exception as e:
+            print(f"❌ 启动失败: {e}")
+            return
+        if result.get("started"):
+            print("✅ 定时拉取已启动")
+            print(f"   PID: {result.get('pid')}")
+            print(f"   间隔: {result.get('interval_minutes')} 分钟")
+            print(f"   配置: {result.get('config_path')}")
+            print(f"   日志: {result.get('log_file')}")
+        else:
+            print("ℹ️ 定时拉取已在运行")
+            status = result.get("status") or {}
+            print(f"   PID: {status.get('pid')}")
+            print(f"   配置: {status.get('config_path')}")
+        return
+
+    if action == "stop":
+        result = stop_scheduler()
+        if result.get("stopped"):
+            forced = " (SIGKILL)" if result.get("forced") else ""
+            print(f"✅ 定时拉取已停止{forced}")
+            print(f"   PID: {result.get('pid')}")
+        else:
+            print(f"ℹ️ 未停止: {result.get('reason')}")
+        return
+
+    if action == "status":
+        status = get_scheduler_status()
+        running = bool(status.get("running"))
+        print("🕒 定时拉取状态")
+        print(f"   运行中: {'是' if running else '否'}")
+        print(f"   PID: {status.get('pid')}")
+        print(f"   配置: {status.get('config_path')}")
+        print(f"   间隔(分钟): {status.get('interval_minutes')}")
+        print(f"   启动时间: {status.get('started_at')}")
+        last_run = status.get("last_run")
+        if last_run:
+            print(f"   最近执行: {last_run.get('timestamp')}")
+            print(f"   最近成功: {last_run.get('success')}")
+            if isinstance(last_run.get("stats"), dict):
+                stats = last_run["stats"]
+                print(
+                    "   最近统计: "
+                    f"课程={stats.get('courses_processed', 0)}, "
+                    f"课件={stats.get('courseware_downloaded', 0)}/{stats.get('courseware_items', 0)}, "
+                    f"作业附件={stats.get('homework_attachments_downloaded', 0)}/{stats.get('homework_attachments', 0)}, "
+                    f"错误={stats.get('errors', 0)}"
+                )
+        return
+
+    if action == "loop":
+        try:
+            run_scheduler_loop(
+                config_path=config_path,
+                interval_minutes=args.interval_minutes,
+                run_now=args.run_now,
+            )
+        except Exception as e:
+            print(f"❌ 定时循环异常: {e}")
+        return
+
+    print(f"❌ 未知动作: {action}")
+
+
 # ============================================================
 #  report 命令
 # ============================================================
@@ -2188,6 +2460,43 @@ def cmd_help(args):
   {name} model Auto
   {name} model gpt-4
 """,
+            "learn-stream": f"""
+🌐 网络学堂输入流（同步作业/课件）
+
+用法:
+  {name} learn-stream --output <目录> --cookie "<cookie>" --csrf <token>
+
+常用参数:
+  --semester <学期ID>         指定学期，不传则自动取当前学期
+  --only all|files|homework   只同步课件或作业
+  --dry-run                   仅抓索引，不下载文件
+  --cookie-file <文件路径>     从文件读取整段 Cookie
+
+说明:
+  需要有效登录 Cookie 和 CSRF Token，可通过参数或环境变量 LEARN_COOKIE / LEARN_CSRF 提供。
+""",
+            "learn-stream-setup": f"""
+🧭 交互式配置网络学堂输入流
+
+用法:
+  {name} learn-stream-setup
+
+说明:
+  逐步引导你配置输出目录、Cookie/CSRF 来源、拉取范围和定时间隔，
+  并可在结束后直接启动定时拉取。
+""",
+            "learn-stream-schedule": f"""
+⏱️ 定时拉取管理
+
+用法:
+  {name} learn-stream-schedule start [--interval-minutes 360]
+  {name} learn-stream-schedule stop
+  {name} learn-stream-schedule status
+  {name} learn-stream-schedule run-once
+
+说明:
+  使用 `learn_stream/config.json` 配置执行定时拉取；start 会在后台运行循环任务。
+""",
             "target": f"""
 🎯 创建 Boss (快捷方式)
 
@@ -2224,6 +2533,9 @@ def _print_command_list(name: str):
     commands = [
         ("📝 任务", [
             ("task", "提交任务（写入 agent 的 tasks/ 目录）"),
+            ("learn-stream", "同步网络学堂作业/课件到本地目录"),
+            ("learn-stream-setup", "交互式配置 learn-stream"),
+            ("learn-stream-schedule", "管理定时拉取（start/stop/status）"),
         ]),
         ("👷 Agent管理 (hire 统一入口)", [
             ("hire", "招募 agent: hire <name> <type> [dep_agent ...]"),
@@ -2369,7 +2681,7 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
             continue
 
         # base / name / model / help 不需要 ensure_dirs
-        if args.command in ("base", "name", "model", "help", "upgrade"):
+        if args.command in ("base", "name", "model", "help", "upgrade", "learn-stream"):
             handlers[args.command](args)
             continue
 
@@ -2601,6 +2913,79 @@ Agent管理 (hire 统一入口):
     p.add_argument("--no-start", action="store_true",
                    help="仅创建目录和配置，不启动扫描器")
 
+    # ---- learn-stream ----
+    p = subparsers.add_parser(
+        "learn-stream",
+        help="🌐 同步网络学堂作业与课件到本地目录",
+        description=(
+            "从清华网络学堂拉取作业与课件，写入本地目录。\n"
+            "需要已登录 Cookie + CSRF Token。"
+        ),
+    )
+    p.add_argument("--output", required=True, help="输出目录")
+    p.add_argument("--cookie", type=str, default=None, help="登录 Cookie（整段 header 值）")
+    p.add_argument("--cookie-file", type=str, default=None, help="从文件读取 Cookie（优先于环境变量）")
+    p.add_argument("--csrf", type=str, default=None, help="CSRF Token")
+    p.add_argument("--semester", type=str, default=None, help="学期 ID（不传则自动取当前学期）")
+    p.add_argument("--lang", type=str, default="zh", choices=["zh", "en"], help="课程接口语言，默认 zh")
+    p.add_argument(
+        "--only",
+        type=str,
+        default="all",
+        choices=["all", "files", "homework"],
+        help="同步范围：all/files/homework",
+    )
+    p.add_argument("--base-url", type=str, default="https://learn.tsinghua.edu.cn", help="网络学堂基地址")
+    p.add_argument("--timeout", type=float, default=20.0, help="HTTP 超时时间（秒）")
+    p.add_argument("--dry-run", action="store_true", help="只抓取索引，不下载文件")
+    p.add_argument(
+        "--no-homework-attachments",
+        action="store_false",
+        dest="homework_attachments",
+        help="不解析并下载作业详情页附件",
+    )
+
+    # ---- learn-stream-setup ----
+    subparsers.add_parser(
+        "learn-stream-setup",
+        help="🧭 交互式配置网络学堂输入流",
+        description="通过交互问答配置 learn-stream 参数，并可选启动定时拉取。",
+    )
+
+    # ---- learn-stream-schedule ----
+    p = subparsers.add_parser(
+        "learn-stream-schedule",
+        help="⏱️ 管理网络学堂定时拉取",
+        description="管理 learn-stream 定时拉取任务（后台循环）。",
+    )
+    p.add_argument(
+        "action",
+        choices=["start", "stop", "status", "run-once", "loop"],
+        help="动作: start/stop/status/run-once/loop",
+    )
+    p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="配置文件路径（默认: BASE_DIR/learn_stream/config.json）",
+    )
+    p.add_argument(
+        "--interval-minutes",
+        type=int,
+        default=None,
+        help="定时拉取间隔（分钟）；不传则读取配置",
+    )
+    p.add_argument(
+        "--run-now",
+        action="store_true",
+        help="(loop 动作) 启动后立刻先执行一次",
+    )
+    p.add_argument(
+        "--no-run-now",
+        action="store_true",
+        help="(start 动作) 启动后先等待一个周期再执行",
+    )
+
     # ---- report ----
     # ---- help ----
     p = subparsers.add_parser("help", help="❓ 显示帮助信息")
@@ -2646,6 +3031,9 @@ Agent管理 (hire 统一入口):
         "base": cmd_base,
         "name": cmd_name,
         "model": cmd_model,
+        "learn-stream": cmd_learn_stream,
+        "learn-stream-setup": cmd_learn_stream_setup,
+        "learn-stream-schedule": cmd_learn_stream_schedule,
         "target": cmd_target,
         "help": cmd_help,
     }
@@ -2680,7 +3068,7 @@ Agent管理 (hire 统一入口):
         pass  # 如果初始化失败，不影响其他功能
 
     # base / name / model / help 命令不需要 ensure_dirs
-    if args.command in ("base", "name", "model", "help", "upgrade"):
+    if args.command in ("base", "name", "model", "help", "upgrade", "learn-stream"):
         handlers[args.command](args)
         return
 
