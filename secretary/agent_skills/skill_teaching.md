@@ -62,4 +62,4 @@ print(f"✅ 技能 '{skill_name}' 已创建: {skill_file}")
 - 技能名称应使用小写字母、数字和连字符（如 `my-skill`、`data-analysis`）
 - 技能描述应该简洁明了，说明这个技能的主要用途
 - 任务描述部分应该详细，包含足够的上下文信息，让其他 agent 能够理解和使用这个技能
-- 创建技能后，可以通过 `kai <skill-name>` 命令使用该技能
+- 创建技能后，可以通过 `study <skill-name>` 命令使用该技能

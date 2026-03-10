@@ -21,6 +21,10 @@ from secretary.input_streams.learn import LearnStreamError, run_learn_stream
 DEFAULT_INTERVAL_MINUTES = 360
 
 
+def _workspace_root() -> Path:
+    return (cfg.WORKSPACE or Path.cwd()).resolve()
+
+
 def _learn_stream_dir() -> Path:
     p = cfg.BASE_DIR / "learn_stream"
     p.mkdir(parents=True, exist_ok=True)
@@ -44,8 +48,9 @@ def get_last_run_path() -> Path:
 
 
 def _default_config() -> dict[str, Any]:
+    ws = _workspace_root()
     return {
-        "output_dir": str((cfg.WORKSPACE / "learn_sync").resolve()),
+        "output_dir": str((ws / "learn_sync").resolve()),
         "cookie": "",
         "cookie_file": "",
         "csrf_token": "",
@@ -57,20 +62,20 @@ def _default_config() -> dict[str, Any]:
         "dry_run": False,
         "homework_attachments": True,
         "schedule_interval_minutes": DEFAULT_INTERVAL_MINUTES,
-        # e2e-HW-machine workflow
-        "machine_enabled": False,
-        "machine_solver_agent": "",
-        "machine_solver_timeout_minutes": 120,
-        "machine_output_dir": str((cfg.WORKSPACE / "machine_homework_output").resolve()),
-        "machine_email_enabled": False,
-        "machine_email_to": "",
-        "machine_email_from": "",
-        "machine_email_subject_template": "[machine] 作业完成通知 ({count})",
-        "machine_smtp_host": "",
-        "machine_smtp_port": 587,
-        "machine_smtp_user": "",
-        "machine_smtp_password": "",
-        "machine_smtp_use_tls": True,
+        # study-machine workflow
+        "study_enabled": False,
+        "study_solver_agent": "",
+        "study_solver_timeout_minutes": 120,
+        "study_output_dir": str((ws / "study_homework_output").resolve()),
+        "study_email_enabled": False,
+        "study_email_to": "",
+        "study_email_from": "",
+        "study_email_subject_template": "[study] 作业完成通知 ({count})",
+        "study_smtp_host": "",
+        "study_smtp_port": 587,
+        "study_smtp_user": "",
+        "study_smtp_password": "",
+        "study_smtp_use_tls": True,
     }
 
 
@@ -135,7 +140,7 @@ def run_once_from_config(config_path: str | Path | None = None) -> dict[str, Any
     result = run_learn_stream(
         cookie=cookie,
         csrf_token=csrf_token,
-        output_dir=str(config.get("output_dir") or (cfg.WORKSPACE / "learn_sync")),
+        output_dir=str(config.get("output_dir") or (_workspace_root() / "learn_sync")),
         semester_id=(str(config.get("semester_id") or "").strip() or None),
         include_files=include_files,
         include_homework=include_homework,
@@ -146,12 +151,12 @@ def run_once_from_config(config_path: str | Path | None = None) -> dict[str, Any
         timeout=float(config.get("timeout") or 20.0),
     )
 
-    machine_result: dict[str, Any] | None = None
-    if bool(config.get("machine_enabled", False)):
-        from secretary.machine.workflow import run_machine_workflow_for_manifest
+    study_result: dict[str, Any] | None = None
+    if bool(config.get("study_enabled", False)):
+        from secretary.study.workflow import run_study_workflow_for_manifest
 
-        machine_result = run_machine_workflow_for_manifest(result, config)
-        result["machine"] = machine_result
+        study_result = run_study_workflow_for_manifest(result, config)
+        result["study"] = study_result
 
     _write_last_run(
         {
@@ -159,7 +164,7 @@ def run_once_from_config(config_path: str | Path | None = None) -> dict[str, Any
             "success": True,
             "interval_minutes": interval_minutes,
             "stats": result.get("stats", {}),
-            "machine": machine_result,
+            "study": study_result,
             "config_path": str(Path(config_path).expanduser().resolve()) if config_path else str(get_default_config_path()),
         }
     )
@@ -353,12 +358,12 @@ def run_scheduler_loop(
                     f"homework_attach={stats.get('homework_attachments_downloaded', 0)}/{stats.get('homework_attachments', 0)} "
                     f"errors={stats.get('errors', 0)}"
                 )
-                machine = result.get("machine")
-                if isinstance(machine, dict):
+                study = result.get("study")
+                if isinstance(study, dict):
                     print(
-                        f"[{ts}] 🤖 machine | new={machine.get('new_jobs_submitted', 0)} "
-                        f"completed={machine.get('completed_jobs', 0)} pending={machine.get('pending_jobs', 0)} "
-                        f"timeouts={machine.get('timeout_jobs', 0)}"
+                        f"[{ts}] 🤖 study | new={study.get('new_jobs_submitted', 0)} "
+                        f"completed={study.get('completed_jobs', 0)} pending={study.get('pending_jobs', 0)} "
+                        f"timeouts={study.get('timeout_jobs', 0)}"
                     )
             except Exception as exc:  # noqa: BLE001
                 print(f"[{ts}] ❌ pull failed: {exc}")

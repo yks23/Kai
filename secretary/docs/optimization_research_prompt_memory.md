@@ -123,7 +123,7 @@
 
 ## 四、文档位置与使用说明
 
-- **本文档路径**：`secretary/docs/optimization_research_prompt_memory.md`（相对于项目根目录 `C:\CODE\Kai`）。  
+- **本文档路径**：`secretary/docs/optimization_research_prompt_memory.md`（相对于项目根目录 `C:\CODE\Study`）。  
 - **建议**：后续「方案与迭代」任务可直接引用本摘要中的分类、要点与链接，用于设计具体优化方案（如 secretary 提示词模板、记忆存储与检索策略）。
 
 *调研完成日期：2026-02-20*

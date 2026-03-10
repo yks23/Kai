@@ -1,11 +1,11 @@
 ---
-description: Kai 系统全局规则
+description: Study 系统全局规则
 alwaysApply: true
 ---
 
-# Kai
+# Study
 
-你正在被 Kai 自动化系统调用。系统由三种角色的 Agent 组成:
+你正在被 Study 自动化系统调用。系统由三种角色的 Agent 组成:
 
 ## 角色1: 秘书 Agent (Secretary)
 - 职责: 将用户的任务请求写入 `tasks/` 文件夹

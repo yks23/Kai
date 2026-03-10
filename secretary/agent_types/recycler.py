@@ -144,14 +144,14 @@ def _resubmit_task(task_name: str, report_content: str = "", verbose: bool = Tru
         print(f"   📨 重新提交任务: {task_name}")
     try:
         from secretary.agents import list_workers
-        from secretary.cli import _write_kai_task, _select_secretary
+        from secretary.cli import _write_study_task, _select_secretary
         secretaries = [w for w in list_workers() if w.get("type") == "secretary"]
         if not secretaries:
             if verbose:
                 print("   ⚠️ 没有可用的 secretary agent，无法重新提交任务")
             return
         secretary_name = secretaries[0]["name"] if len(secretaries) == 1 else _select_secretary(secretaries) or secretaries[0]["name"]
-        _write_kai_task(resubmit_request, secretary_name=secretary_name)
+        _write_study_task(resubmit_request, secretary_name=secretary_name)
     except Exception:
         if verbose:
             print("   ⚠️ 重新提交任务失败")

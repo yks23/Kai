@@ -1,12 +1,12 @@
 """
-技能管理模块 — 让 kai 学会并复用任务模板
+技能管理模块 — 让 study 学会并复用任务模板
 
 技能 = 一个 Markdown 文件，存放在 skills/ 目录下，包含任务描述。
   - 内置技能 (evolving / analysis / debug) 首次运行时自动初始化
-  - 用户通过 `kai learn "描述" skill-name` 可以教会新技能
-  - `kai <skill-name>` 直接把技能模板写入 worker (sen) 的 tasks/ (跳过秘书 agent)
-  - `kai forget <skill-name>` 忘掉一个技能
-  - `kai skills` 列出所有技能
+  - 用户通过 `study learn "描述" skill-name` 可以教会新技能
+  - `study <skill-name>` 直接把技能模板写入 worker (sen) 的 tasks/ (跳过秘书 agent)
+  - `study forget <skill-name>` 忘掉一个技能
+  - `study skills` 列出所有技能
 """
 from pathlib import Path
 

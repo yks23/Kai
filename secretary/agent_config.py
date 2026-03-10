@@ -17,7 +17,7 @@ from enum import Enum
 
 class TerminationCondition(Enum):
     """终止条件类型"""
-    SINGLE_RUN = "single_run"  # 单次执行后终止（如kai）
+    SINGLE_RUN = "single_run"  # 单次执行后终止（如study）
     UNTIL_FILE_DELETED = "until_file_deleted"  # 直到ongoing文件被删除（如worker）
 
 

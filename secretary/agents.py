@@ -14,7 +14,7 @@ Agent 注册表管理
 秘书 Agent 在分配任务时会读取 agent 信息，决定分配给谁。
 
 名字池:
-  `kai hire` 不带名字时，自动从预设名字池中随机抽取一个可用名字。
+  `study hire` 不带名字时，自动从预设名字池中随机抽取一个可用名字。
 """
 import json
 import random
@@ -31,7 +31,7 @@ import secretary.config as cfg
 
 PRESET_NAMES: list[str] = [
     # 中文拼音风
-    "kaisen", "kaicheng", "mingyu", "zhenwei", "haoran",
+    "qisen", "qicheng", "mingyu", "zhenwei", "haoran",
     "tianyu", "junhao", "yifan", "ruoxi", "lingling",
     "xiaoming", "dazhuang", "xiaohu", "afei", "aniu",
     "yichen", "zixuan", "yutong", "ruohan", "chenxi",
@@ -289,7 +289,7 @@ def get_all_running_pids() -> list[tuple[str, int]]:
 
 
 def stop_all_agents():
-    """停止所有运行中的agent进程（用于退出kai时清理）"""
+    """停止所有运行中的agent进程（用于退出study时清理）"""
     import os
     import signal
     import sys as _sys

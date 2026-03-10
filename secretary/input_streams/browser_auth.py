@@ -14,7 +14,6 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-import secretary.config as cfg
 from secretary.input_streams.learn import LearnStreamError
 from secretary.input_streams.scheduler import (
     get_default_config_path,
@@ -102,7 +101,7 @@ def _csrf_from_page(cookie_header: str, base_url: str, timeout: float = 15.0) ->
         base_url,
         headers={
             "Cookie": cookie_header,
-            "User-Agent": "machine-browser-auth/0.1",
+            "User-Agent": "study-browser-auth/0.1",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )

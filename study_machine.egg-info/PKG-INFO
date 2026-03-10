@@ -1,3 +1,13 @@
+Metadata-Version: 2.4
+Name: study-machine
+Version: 0.1.0
+Summary: study-machine — 基于 Cursor Agent 的端到端作业自动化编排系统
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: rich>=13.0
+Requires-Dist: browser-cookie3
+
 ![Study图标](asset/Study.png)
 # Study
 基于 **Cursor Agent** 的自动化任务系统：用户用自然语言提交任务，Study（秘书）负责归类写入，扫描器调度 Worker 执行任务并写报告。CLI 主入口为 **study**（兼容旧名 **secretary**），支持 Windows、macOS、Linux。
@@ -33,7 +43,7 @@
   - **Windows**：通过 PowerShell 调用 `agent`（Cursor 安装后通常已配置）
   - **macOS / Linux**：`agent` 或 `cursor` 在 PATH 中
 - 使用方式二选一：
-  - **将 study 加入 PATH**：通过 `pip install -e .` 或 `pip install study-machine` 安装后，在对应环境的 `Scripts`（Windows）或 `bin`（Unix）目录在 PATH 中即可直接运行 `study`
+  - **将 study 加入 PATH**：通过 `pip install -e .` 或 `pip install study` 安装后，在对应环境的 `Scripts`（Windows）或 `bin`（Unix）目录在 PATH 中即可直接运行 `study`
   - **在虚拟环境中使用**：激活 venv/conda 后，安装的 `study` 即在该环境中可用
 
 ---
@@ -69,14 +79,14 @@ study --help
 
 ### 方式二：发布后安装（从 PyPI）
 
-适用于仅使用、不改源码。发布后包名为 **study-machine**，安装后可在任意目录使用 `study`（需保证安装目录在 PATH 中）。
+适用于仅使用、不改源码。发布后包名为 **study**，安装后可在任意目录使用 `study`（需保证安装目录在 PATH 中）。
 
 ```bash
 # 用户级安装（推荐，无需 root）
-pip install --user study-machine
+pip install --user study
 
 # 或全局安装（需相应权限）
-pip install study-machine
+pip install study
 ```
 
 （Windows 下可在 PowerShell 或 cmd 中执行上述 `pip` 命令；macOS/Linux 在终端中执行即可。）
@@ -86,7 +96,7 @@ pip install study-machine
 
 ### 可选：虚拟环境建议
 
-- 建议在项目目录或工作区使用 **venv**：`python -m venv .venv`，再 `pip install -e .` 或 `pip install study-machine`，这样 `study` 仅在该环境中存在，避免与其它项目冲突。
+- 建议在项目目录或工作区使用 **venv**：`python -m venv .venv`，再 `pip install -e .` 或 `pip install study`，这样 `study` 仅在该环境中存在，避免与其它项目冲突。
 - 使用 **uv** 时，可用 `uv run study ...` 自动在项目虚拟环境中运行，无需手动激活。
 
 ---
@@ -223,8 +233,6 @@ study start sen --once
 | 清理     | `study clean-processes` | 清理泄露的 worker 进程记录。 |
 | 帮助     | `study help` / `study help <命令>` | 显示帮助或某命令的详细说明。 |
 
-> 登录态导入说明：`study learn-stream-auth --open-login` 会尽量自动读取本机浏览器 Cookie；若清华统一认证要求二次验证（短信/企业微信），需先在浏览器完成 2FA，未完成时无法拿到可用的 learn Cookie。
-
 不带子命令直接运行 `study` 会进入**交互模式**，可连续输入上述子命令；输入 `exit` 退出。
 
 ### 执行方式与日志路径
@@ -293,10 +301,10 @@ study start sen --once
 
 ### 发布后首次使用（仅从 PyPI 安装、不参与开发）
 
-若你通过 **PyPI** 安装（`pip install study-machine`），与「从源码开发安装」的差异在于：
+若你通过 **PyPI** 安装（`pip install study`），与「从源码开发安装」的差异在于：
 
-- **无需克隆仓库**：在任意目录执行 `pip install study-machine`（或 `pip install --user study-machine`）即可，安装后 `study` 在对应环境的 Scripts/bin 中。
-- **不涉及源码**：无法直接改 study 的代码；升级依赖 `pip install -U study-machine`（见下方「如何升级 study」）。
+- **无需克隆仓库**：在任意目录执行 `pip install study`（或 `pip install --user study`）即可，安装后 `study` 在对应环境的 Scripts/bin 中。
+- **不涉及源码**：无法直接改 study 的代码；升级依赖 `pip install -U study`（见下方「如何升级 study」）。
 
 **建议的首次使用步骤**（在要作为工作区的目录下执行）：
 
@@ -325,7 +333,7 @@ study -w /path/to/project task "修复测试"
 便于反馈问题或对照发布说明，可查看本机安装的 study 版本。CLI 暂未提供 `study --version`，可通过：
 
 ```bash
-pip show study-machine
+pip show study
 ```
 
 在输出中查看 **Version** 一行即为当前安装版本。
@@ -335,18 +343,18 @@ pip show study-machine
 从 PyPI 安装的用户升级到最新版：
 
 ```bash
-pip install -U study-machine
+pip install -U study
 ```
 
 - **用户级安装**（`pip install --user`）时：
   - **Windows**：升级后 `study.exe` 仍在 `%APPDATA%\Python\Python3x\Scripts`，只要该目录已在 PATH 中，无需额外操作；若曾手动加过该路径，升级后继续有效。
   - **macOS / Linux**：升级后 `study` 仍在 `~/.local/bin`，只要该目录已在 PATH 中（如 `export PATH="$HOME/.local/bin:$PATH"`），无需额外操作。
-- **虚拟环境**：在对应 venv/conda 中执行 `pip install -U study-machine` 即可，该环境内的 `study` 会更新。
+- **虚拟环境**：在对应 venv/conda 中执行 `pip install -U study` 即可，该环境内的 `study` 会更新。
 - **从源码开发安装**：在仓库根目录执行 `git pull` 后无需重装（`pip install -e .` 已指向当前源码），拉取即是最新代码。
 
 ### 获知新版本与发布说明
 
-- **PyPI**：[https://pypi.org/project/study-machine/](https://pypi.org/project/study-machine/) 可查看最新版本号与简要说明。
+- **PyPI**：[https://pypi.org/project/study/](https://pypi.org/project/study/) 可查看最新版本号与简要说明。
 - **GitHub**：若本仓库提供 Releases 页面，可在此查看版本历史与发布说明。可选：若仓库根目录存在 `CHANGELOG.md`，可在该文件或对应 Release 中查看更新记录。
 
 ### 卸载
@@ -354,11 +362,11 @@ pip install -U study-machine
 从本机移除 study（包名 **study**）：
 
 ```bash
-pip uninstall study-machine
+pip uninstall study
 ```
 
-- **用户级安装**：在当初执行 `pip install --user study-machine` 的同一用户、同一 Python 环境下执行上述命令即可。
-- **虚拟环境**：先激活对应 venv/conda，再执行 `pip uninstall study-machine`，仅会从该环境中移除，不影响系统或其他环境。
+- **用户级安装**：在当初执行 `pip install --user study` 的同一用户、同一 Python 环境下执行上述命令即可。
+- **虚拟环境**：先激活对应 venv/conda，再执行 `pip uninstall study`，仅会从该环境中移除，不影响系统或其他环境。
 
 ---
 
@@ -447,7 +455,7 @@ Worker 未完成时会在文件末尾追加 `## 进展记录`；完成后会删�
    - **正式 PyPI**：`twine upload dist/*`（会提示输入 PyPI 用户名与密码或 token）。
    - **Test PyPI（可选）**：先验证再发正式版时，可使用 `twine upload --repository testpypi dist/*`，然后用户可通过 `pip install -i https://test.pypi.org/simple/ study` 安装测试版。
 
-4. **发布后**：在 GitHub 可创建对应 Release、附上 tag 与发布说明；用户即可通过 `pip install -U study-machine` 获取新版本。
+4. **发布后**：在 GitHub 可创建对应 Release、附上 tag 与发布说明；用户即可通过 `pip install -U study` 获取新版本。
 
 ### 发布前检查
 

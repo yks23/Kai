@@ -562,12 +562,12 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
     if trigger_info:
         print(f"   触发: {' | '.join(trigger_info)}")
 
-    # 检查监视目录是否存在，不存在则打印警告（帮助用户发现 kai base 配置错误）
+    # 检查监视目录是否存在，不存在则打印警告（帮助用户发现 study base 配置错误）
     if not trigger.custom_trigger_fn and trigger.watch_dirs:
         for watch_dir in trigger.watch_dirs:
             if not watch_dir.exists():
                 print(f"   ⚠️ 监视目录不存在: {watch_dir}")
-                print(f"      请检查 'kai base' 配置是否正确 (当前 WORKSPACE={cfg.WORKSPACE})")
+                print(f"      请检查 'study base' 配置是否正确 (当前 WORKSPACE={cfg.WORKSPACE})")
 
     # 打印 known agents（排除自身）
     try:
@@ -677,7 +677,7 @@ def run_unified_scanner(config: AgentConfig, once: bool = False, verbose: bool =
 #  入口函数：使用统一的配置系统
 # ============================================================
 
-def run_kai_scanner(once: bool = False, verbose: bool = False, secretary_name: str = "kai") -> None:
+def run_study_scanner(once: bool = False, verbose: bool = False, secretary_name: str = "study") -> None:
     """运行 Secretary 任务扫描器：扫描 agents/<name>/tasks/，每项调用 run_secretary，输出写入 <name>/logs。"""
     from secretary.agent_types import SecretaryAgent
     agent_type = SecretaryAgent()

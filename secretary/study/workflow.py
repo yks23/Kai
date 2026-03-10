@@ -1,5 +1,5 @@
 """
-e2e-HW-machine workflow runtime.
+study-machine workflow runtime.
 
 Single ingress:
   learn_homework_tick
@@ -22,6 +22,10 @@ from typing import Any
 import secretary.config as cfg
 from secretary.agent_paths import _worker_reports_dir, _worker_tasks_dir
 from secretary.agents import get_worker, list_workers
+
+
+def _workspace_root() -> Path:
+    return (cfg.WORKSPACE or Path.cwd()).resolve()
 
 
 def _utc_now() -> str:
@@ -49,7 +53,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _workflow_dir() -> Path:
-    p = cfg.BASE_DIR / "machine_workflow"
+    p = cfg.BASE_DIR / "study_workflow"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -60,7 +64,7 @@ def _state_path() -> Path:
 
 def _default_state() -> dict[str, Any]:
     return {
-        "workflow_name": "e2e-HW-machine",
+        "workflow_name": "study-machine",
         "updated_at": _utc_now(),
         "jobs": {},
         "email_history": [],
@@ -119,7 +123,7 @@ def _discover_homeworks(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _resolve_solver_agent(config: dict[str, Any]) -> str:
-    preferred = str(config.get("machine_solver_agent") or "").strip()
+    preferred = str(config.get("study_solver_agent") or "").strip()
     if preferred and get_worker(preferred):
         return preferred
     workers = list_workers()
@@ -128,12 +132,12 @@ def _resolve_solver_agent(config: dict[str, Any]) -> str:
             return str(w["name"])
     if workers:
         return str(workers[0]["name"])
-    raise RuntimeError("No available agent for machine workflow. Please hire/start an agent first.")
+    raise RuntimeError("No available agent for study workflow. Please hire/start an agent first.")
 
 
 def _task_markdown(job: dict[str, Any], export_dir: Path) -> str:
     return (
-        f"# e2e-HW-machine 自动作业任务\n\n"
+        f"# study-machine 自动作业任务\n\n"
         f"- 作业键: `{job['key']}`\n"
         f"- 学期: `{job['semester_id']}`\n"
         f"- 课程: `{job['course_name']}` (`{job['course_id']}`)\n"
@@ -150,16 +154,16 @@ def _task_markdown(job: dict[str, Any], export_dir: Path) -> str:
 
 
 def _send_email(config: dict[str, Any], subject: str, body: str) -> dict[str, Any]:
-    host = str(config.get("machine_smtp_host") or "").strip()
+    host = str(config.get("study_smtp_host") or "").strip()
     if not host:
         return {"sent": False, "reason": "smtp_host_missing"}
-    port = int(config.get("machine_smtp_port") or 587)
-    smtp_user = str(config.get("machine_smtp_user") or "").strip()
-    smtp_password = str(config.get("machine_smtp_password") or "").strip()
+    port = int(config.get("study_smtp_port") or 587)
+    smtp_user = str(config.get("study_smtp_user") or "").strip()
+    smtp_password = str(config.get("study_smtp_password") or "").strip()
     if not smtp_password:
-        smtp_password = str(__import__("os").environ.get("MACHINE_SMTP_PASSWORD", "")).strip()
-    sender = str(config.get("machine_email_from") or smtp_user).strip()
-    to_raw = str(config.get("machine_email_to") or "").strip()
+        smtp_password = str(__import__("os").environ.get("STUDY_SMTP_PASSWORD", "")).strip()
+    sender = str(config.get("study_email_from") or smtp_user).strip()
+    to_raw = str(config.get("study_email_to") or "").strip()
     to_addrs = [x.strip() for x in to_raw.split(",") if x.strip()]
     if not sender or not to_addrs:
         return {"sent": False, "reason": "sender_or_recipient_missing"}
@@ -170,7 +174,7 @@ def _send_email(config: dict[str, Any], subject: str, body: str) -> dict[str, An
     msg["Subject"] = subject
     msg.set_content(body)
 
-    use_tls = bool(config.get("machine_smtp_use_tls", True))
+    use_tls = bool(config.get("study_smtp_use_tls", True))
     with smtplib.SMTP(host, port, timeout=20) as smtp:
         smtp.ehlo()
         if use_tls:
@@ -182,11 +186,12 @@ def _send_email(config: dict[str, Any], subject: str, body: str) -> dict[str, An
     return {"sent": True, "to": to_addrs, "host": host, "port": port}
 
 
-def build_machine_workflow_json(config: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_study_workflow_json(config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg_data = config or {}
+    ws = _workspace_root()
     return {
-        "project": "e2e-HW-machine",
-        "alias": "machine",
+        "project": "study-machine",
+        "alias": "study",
         "version": "1.0",
         "entry_node": "learn_homework_tick",
         "exit_node": "email_sent",
@@ -208,9 +213,9 @@ def build_machine_workflow_json(config: dict[str, Any] | None = None) -> dict[st
             {
                 "id": "dispatch_solver_task",
                 "type": "action",
-                "description": "Submit homework task into machine agent workflow",
+                "description": "Submit homework task into study agent workflow",
                 "config": {
-                    "solver_agent": str(cfg_data.get("machine_solver_agent") or ""),
+                    "solver_agent": str(cfg_data.get("study_solver_agent") or ""),
                 },
             },
             {
@@ -219,8 +224,8 @@ def build_machine_workflow_json(config: dict[str, Any] | None = None) -> dict[st
                 "description": "Collect agent report and export deliverables",
                 "config": {
                     "output_dir": str(
-                        cfg_data.get("machine_output_dir")
-                        or (cfg.WORKSPACE / "machine_homework_output").resolve()
+                        cfg_data.get("study_output_dir")
+                        or (ws / "study_homework_output").resolve()
                     ),
                 },
             },
@@ -229,8 +234,8 @@ def build_machine_workflow_json(config: dict[str, Any] | None = None) -> dict[st
                 "type": "egress",
                 "description": "Send completion notification email",
                 "config": {
-                    "enabled": bool(cfg_data.get("machine_email_enabled", False)),
-                    "to": str(cfg_data.get("machine_email_to") or ""),
+                    "enabled": bool(cfg_data.get("study_email_enabled", False)),
+                    "to": str(cfg_data.get("study_email_to") or ""),
                 },
             },
         ],
@@ -243,7 +248,7 @@ def build_machine_workflow_json(config: dict[str, Any] | None = None) -> dict[st
     }
 
 
-def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def run_study_workflow_for_manifest(manifest: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     state = _load_state()
     jobs: dict[str, Any] = state.get("jobs", {})
     solver_agent = _resolve_solver_agent(config)
@@ -252,9 +257,7 @@ def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str
     solver_tasks_dir.mkdir(parents=True, exist_ok=True)
     solver_reports_dir.mkdir(parents=True, exist_ok=True)
 
-    output_root = Path(
-        str(config.get("machine_output_dir") or (cfg.WORKSPACE / "machine_homework_output").resolve())
-    ).expanduser().resolve()
+    output_root = Path(str(config.get("study_output_dir") or (_workspace_root() / "study_homework_output").resolve())).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     discovered = _discover_homeworks(manifest)
@@ -269,7 +272,7 @@ def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str
         if key in jobs:
             continue
         job_slug = _safe_slug(key, "homework")
-        task_stem = f"machine-hw-{job_slug}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        task_stem = f"study-hw-{job_slug}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         task_file = solver_tasks_dir / f"{task_stem}.md"
         export_dir = output_root / _safe_slug(hw["semester_id"], "semester") / _safe_slug(hw["course_id"], "course") / _safe_slug(hw["homework_id"], "homework")
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -286,7 +289,7 @@ def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str
         new_jobs += 1
 
     # 2) collect reports for submitted jobs
-    timeout_minutes = int(config.get("machine_solver_timeout_minutes") or 120)
+    timeout_minutes = int(config.get("study_solver_timeout_minutes") or 120)
     for key, job in list(jobs.items()):
         if not isinstance(job, dict):
             continue
@@ -302,7 +305,7 @@ def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str
             answer_md = export_dir / "answer.md"
             if not answer_md.exists():
                 answer_md.write_text(
-                    "# machine answer placeholder\n\n请在后续流程中将最终答案写入该文件。\n",
+                    "# study answer placeholder\n\n请在后续流程中将最终答案写入该文件。\n",
                     encoding="utf-8",
                 )
             metadata_path = export_dir / "metadata.json"
@@ -344,11 +347,11 @@ def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str
             pass
 
     email_result: dict[str, Any] | None = None
-    if completed_items and bool(config.get("machine_email_enabled", False)):
-        tpl = str(config.get("machine_email_subject_template") or "[machine] 作业完成通知 ({count})")
+    if completed_items and bool(config.get("study_email_enabled", False)):
+        tpl = str(config.get("study_email_subject_template") or "[study] 作业完成通知 ({count})")
         subject = tpl.replace("{count}", str(len(completed_items)))
         lines = [
-            "e2e-HW-machine 已完成以下作业：",
+            "study-machine 已完成以下作业：",
             "",
         ]
         for item in completed_items:
@@ -391,7 +394,7 @@ def run_machine_workflow_for_manifest(manifest: dict[str, Any], config: dict[str
     }
 
 
-def get_machine_workflow_status() -> dict[str, Any]:
+def get_study_workflow_status() -> dict[str, Any]:
     state = _load_state()
     jobs = state.get("jobs", {})
     if not isinstance(jobs, dict):

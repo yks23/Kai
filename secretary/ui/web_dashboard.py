@@ -1,5 +1,5 @@
 """
-machine Web Dashboard
+study Web Dashboard
 ---------------------
 Lightweight HTTP server that exposes a modern GUI dashboard on localhost:PORT.
 
@@ -23,7 +23,7 @@ Endpoints
   POST /api/learn-stream/config       → JSON: update learn stream config
   GET  /api/learn-stream/status       → JSON: scheduler status + last run
   GET  /api/learn-stream/log          → JSON: scheduler log tail
-  GET  /api/learn-stream/workflow-json → JSON: e2e-HW-machine workflow spec
+  GET  /api/learn-stream/workflow-json → JSON: study-machine workflow spec
   POST /api/learn-stream/import-browser-auth → auto import cookie/csrf from browser
   POST /api/learn-stream/run-once     → run one pull immediately
   POST /api/learn-stream/start        → start scheduler loop
@@ -74,9 +74,9 @@ from secretary.input_streams.scheduler import (
     stop_scheduler as learn_stop_scheduler,
 )
 from secretary.input_streams.browser_auth import import_learn_auth_from_browser
-from secretary.machine.workflow import (
-    build_machine_workflow_json,
-    get_machine_workflow_status,
+from secretary.study.workflow import (
+    build_study_workflow_json,
+    get_study_workflow_status,
 )
 
 
@@ -96,7 +96,7 @@ class _ServerLog:
         rec = {"ts": ts, "level": level, "msg": msg, "tb": tb}
         with self._lock:
             self._buf.append(rec)
-        # also print to stderr so `kai dashboard` terminal shows it
+        # also print to stderr so `study dashboard` terminal shows it
         line = f"[{ts}] [{level}] {msg}"
         try:
             print(line, file=sys.stderr, flush=True)
@@ -315,7 +315,7 @@ def _watch_loop():
         time.sleep(2)
 
 
-_watcher = threading.Thread(target=_watch_loop, daemon=True, name="kai-dashboard-watcher")
+_watcher = threading.Thread(target=_watch_loop, daemon=True, name="study-dashboard-watcher")
 _watcher.start()
 
 
@@ -354,11 +354,11 @@ def _start_agent_scanner_safe(agent_name: str, agent_type: str) -> tuple[bool, s
 
         if agent_type == "secretary":
             sub_cmd = [sys.executable, "-c",
-                       f"from secretary.scanner import run_kai_scanner; "
-                       f"run_kai_scanner(once=False, verbose=True, secretary_name='{agent_name}')"]
+                       f"from secretary.scanner import run_study_scanner; "
+                       f"run_study_scanner(once=False, verbose=True, secretary_name='{agent_name}')"]
         elif agent_type == "recycler":
             sub_cmd = [sys.executable, "-m", "secretary.recycler"]
-            env["KAI_RECYCLE_BACKGROUND"] = "1"
+            env["STUDY_RECYCLE_BACKGROUND"] = "1"
         else:
             sub_cmd = [sys.executable, "-m", "secretary.scanner",
                        "--agent", agent_name, "--type", agent_type, "--quiet"]
@@ -754,7 +754,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         log_file = learn_get_scheduler_log_path()
         self._json({
             "status": status,
-            "machine": get_machine_workflow_status(),
+            "study": get_study_workflow_status(),
             "log_file": str(log_file),
             "log_tail": _read_file_safe(log_file, 64 * 1024),
         })
@@ -770,7 +770,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _api_learn_stream_workflow_json(self):
         config = learn_load_stream_config()
         self._json({
-            "workflow": build_machine_workflow_json(config),
+            "workflow": build_study_workflow_json(config),
         })
 
     def _post_learn_stream_config(self):
@@ -796,26 +796,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "dry_run",
             "homework_attachments",
             "schedule_interval_minutes",
-            "machine_enabled",
-            "machine_solver_agent",
-            "machine_solver_timeout_minutes",
-            "machine_output_dir",
-            "machine_email_enabled",
-            "machine_email_to",
-            "machine_email_from",
-            "machine_email_subject_template",
-            "machine_smtp_host",
-            "machine_smtp_port",
-            "machine_smtp_user",
-            "machine_smtp_password",
-            "machine_smtp_use_tls",
+            "study_enabled",
+            "study_solver_agent",
+            "study_solver_timeout_minutes",
+            "study_output_dir",
+            "study_email_enabled",
+            "study_email_to",
+            "study_email_from",
+            "study_email_subject_template",
+            "study_smtp_host",
+            "study_smtp_port",
+            "study_smtp_user",
+            "study_smtp_password",
+            "study_smtp_use_tls",
         }
         for key, value in cfg_update.items():
             if key not in allowed:
                 continue
             if key in {"dry_run", "homework_attachments"}:
                 config[key] = bool(value)
-            elif key in {"machine_enabled", "machine_email_enabled", "machine_smtp_use_tls"}:
+            elif key in {"study_enabled", "study_email_enabled", "study_smtp_use_tls"}:
                 config[key] = bool(value)
             elif key == "timeout":
                 try:
@@ -823,7 +823,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self._json({"error": "timeout must be a number"}, 400)
                     return
-            elif key in {"schedule_interval_minutes", "machine_solver_timeout_minutes", "machine_smtp_port"}:
+            elif key in {"schedule_interval_minutes", "study_solver_timeout_minutes", "study_smtp_port"}:
                 try:
                     iv = int(value)
                 except (TypeError, ValueError):
@@ -1317,7 +1317,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 # ──────────────────────────────────────────────────────────────
 
 def run_dashboard(port: int = 12345, open_browser: bool = True):
-    """Start the Kai web dashboard and block until Ctrl+C."""
+    """Start the Study web dashboard and block until Ctrl+C."""
     import webbrowser
     import io as _io
 
@@ -1339,7 +1339,7 @@ def run_dashboard(port: int = 12345, open_browser: bool = True):
     server.timeout = 0.5           # handle_request() returns after 0.5 s if no request
     server.daemon_threads = True   # handler threads won't block shutdown
     url = f"http://127.0.0.1:{port}"
-    _print(f"\n\033[1;36mmachine Dashboard\033[0m  ->  \033[4m{url}\033[0m")
+    _print(f"\n\033[1;36mstudy Dashboard\033[0m  ->  \033[4m{url}\033[0m")
     _print(f"\033[2m workspace: {cfg.BASE_DIR}  |  Ctrl+C to quit\033[0m\n")
 
     if open_browser:

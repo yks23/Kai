@@ -252,7 +252,7 @@ def run_learn_stream(
     lang: str = "zh",
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = 20.0,
-    user_agent: str = "kai-learn-stream/0.1",
+    user_agent: str = "study-learn-stream/0.1",
 ) -> dict[str, Any]:
     """
     Execute Learn input stream and sync selected content to local folder.

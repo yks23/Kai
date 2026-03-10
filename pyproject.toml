@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "e2e-hw-machine"
+name = "study-machine"
 version = "0.1.0"
-description = "e2e-HW-machine — 基于 Cursor Agent 的端到端作业自动化编排系统"
+description = "study-machine — 基于 Cursor Agent 的端到端作业自动化编排系统"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -15,9 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-machine = "secretary.cli:main"
-kai = "secretary.cli:main"
-# 兼容旧名
+study = "secretary.cli:main"
 secretary = "secretary.cli:main"
 
 [tool.setuptools.packages.find]

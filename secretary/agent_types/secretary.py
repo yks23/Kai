@@ -93,7 +93,7 @@ def build_secretary_prompt(task_file: Path, secretary_name: str) -> str:
         known_agents_section = (
             "## ⚠️ 没有可用的 Agent\n"
             "**当前没有招募任何工人。**\n\n"
-            "**你必须拒绝处理这个任务**，并告知用户先用 `kai hire` 招募工人。\n"
+            "**你必须拒绝处理这个任务**，并告知用户先用 `study hire` 招募工人。\n"
         )
 
     # 全局目标（可选）
@@ -119,7 +119,7 @@ def build_secretary_prompt(task_file: Path, secretary_name: str) -> str:
 #  执行函数
 # ============================================================
 
-def run_secretary(task_file: Path, verbose: bool = True, secretary_name: str = "kai",
+def run_secretary(task_file: Path, verbose: bool = True, secretary_name: str = "study",
                   dialog_file=None) -> bool:
     """运行秘书 Agent 处理任务文件。返回是否成功。"""
     first   = build_secretary_prompt(task_file, secretary_name)

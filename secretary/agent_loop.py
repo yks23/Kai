@@ -1,7 +1,7 @@
 """
 Agent 循环框架 — 统一「触发 → 取项 → 处理一项 → 间隔」的扫描循环
 
-各角色（Kai 扫描器、Worker 扫描器、回收者、Keep 等）只需实现 trigger_fn 与 process_fn，
+各角色（Study 扫描器、Worker 扫描器、回收者、Keep 等）只需实现 trigger_fn 与 process_fn，
 由 run_loop 负责 while + sleep + once + 异常与 KeyboardInterrupt。
 """
 import time
@@ -14,7 +14,7 @@ def load_prompt(template_name: str) -> str:
     加载提示词模板，支持从多个位置加载。
     
     优先级：
-    1. {WORKSPACE}/Kai/custom_prompts/ (用户自定义)
+    1. {WORKSPACE}/Study/custom_prompts/ (用户自定义)
     2. secretary/prompts/ (包内默认)
     
     Args:

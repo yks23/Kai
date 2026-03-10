@@ -1,13 +1,13 @@
 """
-machine 系统配置
+study 系统配置
 
 WORKSPACE (工作区) 优先级:
   1. CLI 参数 --workspace / -w        (最高)
   2. 环境变量 SECRETARY_WORKSPACE
-  3. 持久化配置 machine base <path>
+  3. 持久化配置 study base <path>
   4. 当前工作目录 CWD                   (最低)
 
-BASE_DIR 统一为 WORKSPACE/machine
+BASE_DIR 统一为 WORKSPACE/study
 
 PROMPTS_DIR (提示词模板):
   固定指向包内的 prompts/ 目录，随包分发。
@@ -22,7 +22,7 @@ PROMPTS_DIR = _PACKAGE_DIR / "prompts"          # 提示词模板 (随包分发)
 
 # ============ 工作区路径 (可配置) ============
 # WORKSPACE: 用户指定的工作目录（agent 执行时的工作目录）
-# BASE_DIR: 统一为 WORKSPACE/machine（系统目录存放位置）
+# BASE_DIR: 统一为 WORKSPACE/study（系统目录存放位置）
 WORKSPACE: Optional[Path] = None
 
 def _resolve_workspace() -> Path:
@@ -31,7 +31,7 @@ def _resolve_workspace() -> Path:
       env var > CWD
     (CLI --workspace 在 cli.py 中覆盖，优先级最高)
 
-    注意：持久化的 kai base 设置不再影响启动路径，避免移动项目目录后
+    注意：持久化的 study base 设置不再影响启动路径，避免移动项目目录后
     使用旧路径导致 scanner 监视错误目录。若需固定工作区请设置
     SECRETARY_WORKSPACE 环境变量。
     """
@@ -48,17 +48,11 @@ def _resolve_workspace() -> Path:
 WORKSPACE = _resolve_workspace()
 
 def _resolve_base_dir(workspace: Path) -> Path:
-    """默认使用 machine 目录；兼容旧 Kai 目录。"""
-    machine_dir = workspace / "machine"
-    legacy_dir = workspace / "Kai"
-    if machine_dir.exists():
-        return machine_dir
-    if legacy_dir.exists():
-        return legacy_dir
-    return machine_dir
+    """统一使用 workspace/study 目录。"""
+    return workspace / "study"
 
 
-# BASE_DIR 统一为 WORKSPACE/machine（若旧目录 Kai 已存在则兼容使用）
+# BASE_DIR 统一为 WORKSPACE/study
 BASE_DIR = _resolve_base_dir(WORKSPACE)
 
 # 自定义目录（用于用户贡献的 agent 类型和提示词）
@@ -104,7 +98,7 @@ RECYCLER_INTERVAL = int(os.environ.get("RECYCLER_INTERVAL", "120"))  # 回收者
 
 # ============ 执行方式与日志 ============
 # 前台执行：task, keep（仅 spawn 子进程后立即返回）, hire, fire, workers, monitor, report, base, name, model, target, help, check（tail -f）, stop, clean-*, skills, learn, forget, use
-# 后台执行（输出写日志）：start <worker|kai>, keep（子进程循环）, recycle
+# 后台执行（输出写日志）：start <worker|study>, keep（子进程循环）, recycle
 # 日志路径：所有 agent 相关 → agents/<name>/logs/scanner.log
 LONG_RUNNING_COMMANDS = frozenset({"start", "keep", "recycle", "monitor", "task"})
 
@@ -142,7 +136,7 @@ def get_workspace() -> Path:
 
 
 def apply_workspace(ws: Path):
-    """运行时切换工作区 (由 CLI --workspace 或 machine base 调用)"""
+    """运行时切换工作区 (由 CLI --workspace 或 study base 调用)"""
     import secretary.config as _self
     ws_resolved = ws.resolve()
     _self.WORKSPACE = ws_resolved

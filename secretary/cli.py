@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-machine — CLI 入口（基于 Cursor Agent 的自动化任务系统）
+study — CLI 入口（基于 Cursor Agent 的自动化任务系统）
 
 用法:
-  machine task "实现一个HTTP服务器"
-  machine evolving / analysis / debug        (内置技能)
-  machine learn "任务描述" skill-name         (学技能)
-  machine <skill-name>                       (使用技能)
-  machine forget <skill-name>                (忘技能)
-  machine skills                             (列出所有技能)
-  machine hire / recycle                     (后台服务)
-  machine monitor / stop / clean-logs
-  machine base ./          设定工作区为当前目录
-  machine name lily        给我改个名字叫 lily
-  machine target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
+  study task "实现一个HTTP服务器"
+  study evolving / analysis / debug        (内置技能)
+  study learn "任务描述" skill-name         (学技能)
+  study <skill-name>                       (使用技能)
+  study forget <skill-name>                (忘技能)
+  study skills                             (列出所有技能)
+  study hire / recycle                     (后台服务)
+  study monitor / stop / clean-logs
+  study base ./          设定工作区为当前目录
+  study name lily        给我改个名字叫 lily
+  study target "目标描述"  创建Boss Agent (boss yks "目标" ykc)
 """
 import argparse
 import os
@@ -37,7 +37,7 @@ def _cli_name() -> str:
 
 
 def _is_workspace_configured(args) -> bool:
-    """检测是否已通过 kai base / -w / SECRETARY_WORKSPACE 设定工作区（未设定则使用 CWD）"""
+    """检测是否已通过 study base / -w / SECRETARY_WORKSPACE 设定工作区（未设定则使用 CWD）"""
     if get_base_dir():
         return True
     if os.environ.get("SECRETARY_WORKSPACE", "").strip():
@@ -260,12 +260,12 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
         # 对于内置类型，使用特定的启动方式（保持向后兼容）
         # 对于自定义类型，使用统一的 scanner 启动方式
         if agent_type == "secretary":
-            # Secretary 使用 scanner.run_kai_scanner
-            sub_cmd = [sys.executable, "-c", f"from secretary.scanner import run_kai_scanner; run_kai_scanner(once=False, verbose=True, secretary_name='{agent_name}')"]
+            # Secretary 使用 scanner.run_study_scanner
+            sub_cmd = [sys.executable, "-c", f"from secretary.scanner import run_study_scanner; run_study_scanner(once=False, verbose=True, secretary_name='{agent_name}')"]
         elif agent_type == "recycler":
             # Recycler 使用 secretary.recycler，需要特殊环境变量
             sub_cmd = [sys.executable, "-m", "secretary.recycler"]
-            env["KAI_RECYCLE_BACKGROUND"] = "1"
+            env["STUDY_RECYCLE_BACKGROUND"] = "1"
         else:
             # 其他类型（worker, boss 或自定义类型）使用统一的 scanner
             sub_cmd = [sys.executable, "-m", "secretary.scanner", "--agent", agent_name, "--type", agent_type, "--quiet"]
@@ -313,7 +313,7 @@ def _start_agent_scanner(agent_name: str, agent_type: str, silent: bool = False)
 #  任务提交
 # ============================================================
 
-def _write_kai_task(request: str, min_time: int = 0, secretary_name: str = "kai") -> Path:
+def _write_study_task(request: str, min_time: int = 0, secretary_name: str = "study") -> Path:
     """公用：将任务写入指定secretary的 tasks 目录，由secretary扫描器处理（run_secretary）。
     与 task 命令不指定 --worker 时行为一致。返回写入的文件路径。
     """
@@ -468,7 +468,7 @@ def _submit_task(request: str, min_time: int = 0, worker_name: str | None = None
         return
 
     secretary_name = secretaries[0]["name"]
-    task_file = _write_kai_task(request, min_time=min_time, secretary_name=secretary_name)
+    task_file = _write_study_task(request, min_time=min_time, secretary_name=secretary_name)
     print(f"\n📨 任务已提交到 {secretary_name}")
     print(f"   ✅ 任务文件: {task_file}")
     if min_time > 0:
@@ -519,7 +519,7 @@ def cmd_task(args):
                 print("❌ 未选择secretary，任务提交已取消")
                 return
 
-        task_file = _write_kai_task(request, min_time=args.time, secretary_name=secretary_name)
+        task_file = _write_study_task(request, min_time=args.time, secretary_name=secretary_name)
         print(f"\n📨 任务已提交到 {secretary_name}")
         print(f"   ✅ 任务文件: {task_file}")
         if args.time > 0:
@@ -926,7 +926,7 @@ def cmd_recycle(args):
     recycler_name = "recycler"
 
     # 已在后台子进程中，直接执行 recycler 主循环
-    if os.environ.get("KAI_RECYCLE_BACKGROUND") == "1":
+    if os.environ.get("STUDY_RECYCLE_BACKGROUND") == "1":
         run_recycler(once=args.once, verbose=False)
         return
 
@@ -1601,7 +1601,7 @@ def cmd_clean_processes(args):
 # ============================================================
 
 def _find_repo_root() -> Path | None:
-    """查找 Kai 源码的 git 仓库根目录（editable install 时是源码目录）"""
+    """查找 Study 源码的 git 仓库根目录（editable install 时是源码目录）"""
     pkg_dir = Path(__file__).resolve().parent
     candidate = pkg_dir.parent
     if (candidate / ".git").is_dir() and (candidate / "pyproject.toml").is_file():
@@ -1669,8 +1669,8 @@ def cmd_upgrade(args):
     """从远端 git 拉取最新代码并重新安装"""
     repo = _find_repo_root()
     if not repo:
-        print("❌ 未找到 Kai 源码仓库（仅支持 editable install 方式）")
-        print("   如果通过 pip install kai 安装，请用: pip install -U kai")
+        print("❌ 未找到 Study 源码仓库（仅支持 editable install 方式）")
+        print("   如果通过 pip install study 安装，请用: pip install -U study")
         return
 
     name = _cli_name()
@@ -1726,7 +1726,7 @@ def cmd_upgrade(args):
     if has_changes:
         print("   ⚠️  检测到本地未提交更改，暂存中...")
         subprocess.run(
-            ["git", "stash", "push", "-m", "kai-upgrade-auto-stash"],
+            ["git", "stash", "push", "-m", "study-upgrade-auto-stash"],
             capture_output=True, timeout=10, cwd=str(repo),
         )
         stashed = True
@@ -2056,7 +2056,7 @@ def cmd_learn_stream_setup(args):
     cookie = ""
     cookie_file = ""
     if use_cookie_file:
-        cookie_file = _ask("   cookie 文件路径", str(config.get("cookie_file", "")).strip() or "~/.config/machine/learn.cookie")
+        cookie_file = _ask("   cookie 文件路径", str(config.get("cookie_file", "")).strip() or "~/.config/study/learn.cookie")
     else:
         cookie = _ask("   直接粘贴 Cookie", str(config.get("cookie", "")).strip())
 
@@ -2409,7 +2409,7 @@ def cmd_help(args):
   {name} check <agent名称> -f    实时跟踪（Ctrl+C 退出）
 """,
             "upgrade": f"""
-🔄 更新 Kai 到最新版本
+🔄 更新 Study 到最新版本
 
 用法:
   {name} upgrade
@@ -2628,7 +2628,7 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
     """无子命令时进入交互模式。"""
     # 工作区优先级：--workspace > SECRETARY_WORKSPACE 环境变量 > CWD
     if not initial_args.workspace and not os.environ.get("SECRETARY_WORKSPACE"):
-        # 始终使用当前工作目录，不读取 kai base 持久化配置
+        # 始终使用当前工作目录，不读取 study base 持久化配置
         cfg.apply_workspace(Path.cwd().resolve())
     
     if initial_args.workspace:
@@ -2695,10 +2695,10 @@ def _run_interactive_loop(parser, initial_args, handlers, skill_names):
         if not parts:
             continue
 
-        # 如果第一个 token 是命令名本身（kai/secretary），自动去掉
-        # 这样用户在交互模式下也可以输入 "kai skills" 而不报错
+        # 如果第一个 token 是命令名本身（study/secretary），自动去掉
+        # 这样用户在交互模式下也可以输入 "study skills" 而不报错
         first = parts[0]
-        if first in (name, "kai", "secretary"):
+        if first in (name, "study", "secretary"):
             parts = parts[1:]
             if not parts:
                 continue
@@ -2825,7 +2825,7 @@ Agent管理 (hire 统一入口):
   {name} monitor                    📺 实时监控面板 (TUI)
   {name} monitor --text             📊 查看系统状态 (文本快照)
   {name} monitor -i 5               📺 监控面板，每 5 秒刷新
-  {name} check <worker|kai>         📺 实时查看日志输出
+  {name} check <worker|study>         📺 实时查看日志输出
   {name} clean-logs                 🧹 清理日志文件
         """,
     )
@@ -3126,7 +3126,7 @@ Agent管理 (hire 统一入口):
         return
 
     # 工作区优先级：--workspace > SECRETARY_WORKSPACE 环境变量 > CWD
-    # 注意：kai base 的持久化配置不再自动生效，避免移动项目目录后使用旧路径导致混乱。
+    # 注意：study base 的持久化配置不再自动生效，避免移动项目目录后使用旧路径导致混乱。
     # 若需固定工作区，请设置环境变量 SECRETARY_WORKSPACE 或每次使用 --workspace。
     if args.workspace:
         ws = Path(args.workspace).resolve()
