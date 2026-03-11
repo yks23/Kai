@@ -1444,6 +1444,9 @@ function _lsMsg(msg, color = 'var(--muted)') {
   el.style.color = color;
 }
 
+let _lsAuthPendingExtract = false;
+let _lsAuthPrompting = false;
+
 async function openLearnOverlay() {
   const ov = document.getElementById('learn-overlay');
   ov.style.display = 'flex';
@@ -1490,16 +1493,17 @@ async function loadLearnConfig() {
   }
 }
 
-async function importLearnAuthFromBrowser() {
-  _lsMsg('正在从浏览器导入登录态…');
+async function _extractLearnAuthNow() {
+  _lsMsg('正在提取浏览器登录态…');
   try {
     const data = await api('/api/learn-stream/import-browser-auth', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({browser: 'auto', open_login: true}),
+      body: JSON.stringify({browser: 'auto', open_login: false}),
     });
     const r = data.result || {};
     await loadLearnConfig();
+    _lsAuthPendingExtract = false;
     _lsMsg(
       `导入成功: browser=${r.browser || '-'}; ${r.csrf_found ? 'CSRF已找到' : 'CSRF未找到，请手动补充'}`,
       'var(--green)'
@@ -1509,6 +1513,44 @@ async function importLearnAuthFromBrowser() {
     _lsMsg(`导入失败: ${e.message || e}`, 'var(--red)');
   }
 }
+
+async function _promptLearnAuthExtract() {
+  if (_lsAuthPrompting || !_lsAuthPendingExtract) return;
+  _lsAuthPrompting = true;
+  try {
+    const allow = window.confirm('检测到你已返回本页面。是否允许现在提取 Cookie/CSRF？');
+    if (!allow) {
+      _lsMsg('你已取消提取；登录完成后可再次点击“浏览器导入登录态”。', 'var(--yellow)');
+      return;
+    }
+    await _extractLearnAuthNow();
+  } finally {
+    _lsAuthPrompting = false;
+  }
+}
+
+async function importLearnAuthFromBrowser() {
+  if (!_lsAuthPendingExtract) {
+    const ok = window.confirm('将打开网络学堂登录页。请先登录并完成企业微信/短信二次验证；返回本页后会弹窗询问是否允许提取。是否继续？');
+    if (!ok) {
+      _lsMsg('已取消打开登录页。');
+      return;
+    }
+    window.open('https://learn.tsinghua.edu.cn', '_blank', 'noopener');
+    _lsAuthPendingExtract = true;
+    _lsMsg('已打开登录页。完成登录后回到本页，会弹窗询问“是否允许提取”。', 'var(--yellow)');
+    return;
+  }
+  await _promptLearnAuthExtract();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && _lsAuthPendingExtract) {
+    setTimeout(() => {
+      _promptLearnAuthExtract();
+    }, 300);
+  }
+});
 
 async function saveLearnConfig() {
   const interval = parseInt(_lsGetValue('ls-interval') || '0', 10);
